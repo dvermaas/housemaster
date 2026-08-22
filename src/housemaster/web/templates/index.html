@@ -89,6 +89,7 @@
                  {% if not n %}disabled{% endif %}>
           <label for="e-{{ loop.index }}"
                  class="{% if not n %}empty{% endif %}"
+                 data-label="{{ label }}"
                  style="--swatch: var(--e-{{ label | energy_class }})"
                  title="{{ n }} houses">
             {{ label }}<span class="count">{{ n or '' }}</span>

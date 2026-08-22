@@ -214,6 +214,48 @@ def test_the_sentinel_overrides_every_inherited_htmx_attribute(
     assert 'hx-swap="outerHTML"' in sentinel
 
 
+# --- theme and lightbox ----------------------------------------------------
+
+
+def test_every_page_carries_the_theme_toggle(client: FlaskClient) -> None:
+    for path in ("/", "/?view=map", "/house/1"):
+        assert 'id="theme-toggle"' in body(client.get(path)), path
+
+
+def test_the_theme_is_applied_before_first_paint(client: FlaskClient) -> None:
+    # A stored preference read after the stylesheet would flash the wrong theme.
+    page = body(client.get("/"))
+    head = page[: page.index("</head>")]
+    assert "housemaster-theme" in head
+    assert head.index("housemaster-theme") < head.index("app.css")
+
+
+def test_gallery_photos_no_longer_open_a_new_tab(client: FlaskClient) -> None:
+    gallery = body(client.get("/house/1"))
+    start = gallery.index('class="gallery"')
+    assert 'target="_blank"' not in gallery[start : start + 900]
+
+
+def test_gallery_links_still_work_without_javascript(client: FlaskClient) -> None:
+    # The href is the fallback; lightbox.js only intercepts the click.
+    page = body(client.get("/house/1"))
+    assert "cloud.funda.nl" in page[page.index('class="gallery"') :]
+
+
+def test_the_lightbox_shell_is_present_and_hidden(client: FlaskClient) -> None:
+    page = body(client.get("/house/1"))
+    assert 'id="lightbox"' in page
+    assert 'aria-modal="true"' in page
+    at = page.index('id="lightbox"')
+    assert "hidden" in page[at : at + 200]
+
+
+def test_pale_energy_chips_carry_their_label_for_contrast(client: FlaskClient) -> None:
+    # White on the yellow end of the NEN scale is unreadable; the CSS keys off
+    # data-label to give C and D dark ink instead.
+    assert 'data-label="B"' in body(client.get("/"))
+
+
 # --- the map view ----------------------------------------------------------
 
 

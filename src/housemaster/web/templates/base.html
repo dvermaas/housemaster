@@ -4,19 +4,63 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}HouseMaster{% endblock %}</title>
+  {#
+    Runs before any paint, so a stored preference never flashes the wrong
+    theme. No stored preference means no attribute, which leaves the CSS to
+    follow prefers-color-scheme.
+  #}
+  <script>
+    try {
+      var t = localStorage.getItem("housemaster-theme");
+      if (t === "light" || t === "dark") {
+        document.documentElement.setAttribute("data-theme", t);
+      }
+    } catch (e) { /* private mode: fall back to the system preference */ }
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/maplibre-gl.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   {# Vendored, not a CDN: this is a local tool that must work offline. The map
      is the one exception -- its tiles have to come from the network. #}
   <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', filename='vendor/maplibre-gl.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='theme.js') }}" defer></script>
   <script src="{{ url_for('static', filename='map.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='lightbox.js') }}" defer></script>
 </head>
 <body>
   <header class="masthead">
     <a class="wordmark" href="{{ url_for('browse.index') }}">House<span>master</span></a>
-    {% block masthead %}{% endblock %}
+    <div class="masthead-right">
+      {% block masthead %}{% endblock %}
+      <button type="button" class="themetoggle" id="theme-toggle"
+              aria-label="Switch between light and dark">
+        <span class="glyph to-dark">◐</span><span class="glyph to-light">◑</span>
+        <span class="to-dark">Dark</span><span class="to-light">Light</span>
+      </button>
+    </div>
   </header>
   {% block content %}{% endblock %}
+
+  {# One lightbox for the whole app; the detail page fills it on demand. #}
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true"
+       aria-label="Photo viewer" hidden>
+    <div class="lightbox-bar">
+      <span class="lightbox-where" id="lightbox-where"></span>
+      <span class="lightbox-count" id="lightbox-count"></span>
+      <button type="button" class="lightbox-close" id="lightbox-close"
+              aria-label="Close photo viewer">✕</button>
+    </div>
+    <div class="lightbox-stage">
+      <div class="lightbox-frame">
+        <img id="lightbox-image" alt="">
+      </div>
+    </div>
+    <div class="lightbox-foot">
+      <button type="button" class="lightbox-nav" id="lightbox-prev"
+              aria-label="Previous photo">←</button>
+      <button type="button" class="lightbox-nav" id="lightbox-next"
+              aria-label="Next photo">→</button>
+    </div>
+  </div>
 </body>
 </html>

@@ -16,7 +16,8 @@
     <span class="fig">{{ listing.price_per_m2 | euro }}/m²</span>
     <span class="fig">{{ listing.living_area or '—' }} m²</span>
     <span class="fig">{{ listing.rooms or '—' }} rooms · {{ listing.bedrooms or '—' }} bed</span>
-    <span class="chip" style="--swatch: var(--e-{{ listing.energy_label | energy_class }})">
+    <span class="chip" data-label="{{ listing.energy_label }}"
+          style="--swatch: var(--e-{{ listing.energy_label | energy_class }})">
       {{ listing.energy_label or '?' }}
     </span>
     {% if listing.status and listing.status != 'none' %}
@@ -32,7 +33,8 @@
   {% macro shot(photo, index) %}
     {% set src = url_for('browse.media_file', filename=photo.local_path)
                  if photo.local_path else photo_url(photo.image_id, 720) %}
-    <a href="{{ photo_url(photo.image_id, 1440) }}" target="_blank" rel="noopener">
+    {# The href is the no-JS fallback; lightbox.js intercepts the click. #}
+    <a href="{{ photo_url(photo.image_id, 1440) }}">
       <img src="{{ src }}" alt="Photo {{ index }} of {{ listing.address }}"
            loading="{{ 'eager' if index <= 3 else 'lazy' }}" decoding="async">
     </a>

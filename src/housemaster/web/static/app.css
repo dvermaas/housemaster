@@ -44,6 +44,56 @@
 
   --rail: 268px;
   --gap: 20px;
+
+  --scrim: rgb(16 18 21 / 0.95);
+  --shadow: 0 2px 10px rgb(22 24 28 / 0.13);
+  --basemap: positron;      /* read by map.js */
+  color-scheme: light;
+}
+
+/* Dark mode is not an inverted palette -- it is the other half of the same
+ * idea. A real blueprint is light lines on dark ground, so the drafting
+ * metaphor holds: vellum by day, cyanotype by night. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #101419;
+    --paper-sunk: #161b22;
+    --card: #171c24;
+    --ink: #e7eaee;
+    --ink-soft: #99a2ae;
+    --ink-faint: #6d7683;
+    --rule: #262d37;
+    --rule-strong: #3a434f;
+    --blueprint: #79a8d8;
+    --blueprint-wash: #1b2430;
+    --drop: #e2795d;
+    --drop-wash: #2a1d1a;
+    --scrim: rgb(6 8 11 / 0.96);
+    --shadow: 0 2px 14px rgb(0 0 0 / 0.5);
+    --basemap: dark;
+    --ctrl-invert: invert(1) hue-rotate(180deg);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #101419;
+  --paper-sunk: #161b22;
+  --card: #171c24;
+  --ink: #e7eaee;
+  --ink-soft: #99a2ae;
+  --ink-faint: #6d7683;
+  --rule: #262d37;
+  --rule-strong: #3a434f;
+  --blueprint: #79a8d8;
+  --blueprint-wash: #1b2430;
+  --drop: #e2795d;
+  --drop-wash: #2a1d1a;
+  --scrim: rgb(6 8 11 / 0.96);
+  --shadow: 0 2px 14px rgb(0 0 0 / 0.5);
+  --basemap: dark;
+  --ctrl-invert: invert(1) hue-rotate(180deg);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -386,6 +436,12 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
   color: #fff;
   background: var(--swatch, var(--e-unknown));
 }
+/* White on #c8d400 / #ffd500 was never readable -- the pale end of the scale
+   takes graphite instead. */
+.chip[data-label="C"],
+.chip[data-label="D"],
+.scale label[data-label="C"],
+.scale label[data-label="D"] { color: #16181c; }
 
 .card .foot {
   display: flex;
@@ -608,10 +664,19 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
   border-color: var(--rule-strong) !important;
   background: color-mix(in srgb, var(--card) 88%, transparent) !important;
 }
+/* Attribution has to stay legible in both themes -- OpenFreeMap, OpenMapTiles
+   and OpenStreetMap all require visible credit. */
 .maplibregl-ctrl-attrib {
   font-size: 10px !important;
-  background: color-mix(in srgb, var(--card) 88%, transparent) !important;
+  color: var(--ink-soft) !important;
+  background: color-mix(in srgb, var(--card) 92%, transparent) !important;
 }
+.maplibregl-ctrl-attrib a { color: var(--ink) !important; }
+.maplibregl-ctrl-attrib-button {
+  background-color: var(--card) !important;
+  filter: var(--ctrl-invert, none);
+}
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter: var(--ctrl-invert, none); }
 
 /* ------------------------------------------------------------- map popup */
 
@@ -654,4 +719,131 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
 
 @media (max-width: 900px) {
   #map { height: 62vh; }
+}
+
+/* -------------------------------------------------------- theme toggle */
+
+.masthead-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.masthead .meta { margin-left: 0; }
+
+.themetoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--rule);
+  padding: 5px 9px;
+  cursor: pointer;
+}
+.themetoggle:hover { border-color: var(--blueprint); color: var(--blueprint); }
+.themetoggle .glyph { font-size: 12px; line-height: 1; }
+
+/* Only the label for the theme you would switch *to* is shown. */
+.themetoggle .to-dark { display: inline; }
+.themetoggle .to-light { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .themetoggle .to-dark { display: none; }
+  :root:not([data-theme="light"]) .themetoggle .to-light { display: inline; }
+}
+:root[data-theme="dark"] .themetoggle .to-dark { display: none; }
+:root[data-theme="dark"] .themetoggle .to-light { display: inline; }
+:root[data-theme="light"] .themetoggle .to-dark { display: inline; }
+:root[data-theme="light"] .themetoggle .to-light { display: none; }
+
+/* ------------------------------------------------------------- lightbox */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: none;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+}
+.lightbox[open],
+.lightbox.is-open { display: grid; grid-template-rows: auto 1fr auto; }
+
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  color: #eceef0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.lightbox-where { text-transform: uppercase; opacity: 0.8; }
+.lightbox-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.lightbox-close,
+.lightbox-nav {
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1;
+  color: #eceef0;
+  background: rgb(255 255 255 / 0.06);
+  border: 1px solid rgb(255 255 255 / 0.32);
+  padding: 7px 13px;
+  cursor: pointer;
+}
+.lightbox-close:hover,
+.lightbox-nav:hover:not([disabled]) {
+  background: rgb(255 255 255 / 0.16);
+  border-color: rgb(255 255 255 / 0.6);
+}
+.lightbox-nav[disabled] { opacity: 0.25; cursor: default; }
+
+.lightbox-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 0 18px;
+  min-height: 0;
+}
+.lightbox-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #0b0d10;
+}
+
+/* Registration ticks again -- a plate on the drawing sheet. */
+.lightbox-frame { position: relative; max-width: 100%; max-height: 100%; }
+.lightbox-frame::before,
+.lightbox-frame::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgb(255 255 255 / 0.5);
+  pointer-events: none;
+}
+.lightbox-frame::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+.lightbox-frame::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+.lightbox-foot {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 18px;
+}
+
+body.lightbox-open { overflow: hidden; }
+
+@media (max-width: 700px) {
+  .lightbox-where { display: none; }
+  .lightbox-stage { padding: 0 8px; }
 }

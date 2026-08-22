@@ -19,6 +19,7 @@ Working end to end: scrape into a local cache, then browse and filter it.
 - [x] SQLite cache with dedupe, price/status history and photo caching
 - [x] Web UI with filtering
 - [x] Map view, filtered live
+- [x] Light/dark themes and a full-screen photo viewer
 - [ ] Score against explicit client criteria
 - [ ] Export the client-facing overview
 
@@ -72,7 +73,7 @@ There is no checkpoint state and no `--resume` flag.
 ## Development
 
 ```bash
-uv run pytest                                 # 220 tests, offline
+uv run pytest                                 # 226 tests, offline
 uv run ruff check . && uv run ruff format .   # lint + format
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # canary against the live site
 ```
@@ -303,6 +304,21 @@ Two implementation details that are load-bearing:
 The map is the **one part of the app that needs a network connection** — the
 OSM tile policy forbids pre-downloading tiles, so they cannot be vendored the
 way htmx and the fonts are.
+
+### Themes and the photo viewer
+
+The toggle at top right switches **light and dark**, and the two are the same
+idea rather than an inverted palette: a real blueprint is light lines on dark
+ground, so light mode is drafting vellum and dark mode is cyanotype. The map's
+basemap follows. A choice is remembered; with no choice made the app follows
+your operating system, and a small inline script applies it before first paint
+so the wrong theme never flashes.
+
+Clicking any photo on a house page opens it **full screen** rather than in a new
+tab — arrow keys or the on-screen buttons move through the set, a counter shows
+where you are, and Escape, the ✕ or a click on the backdrop dismisses it. The
+gallery links keep their `href`, so with JavaScript off they still open the
+photo directly.
 
 Design direction is "Plattegrond": architectural drafting, hairline rules, and
 every figure set in a monospace face with tabular numerals so prices and €/m²

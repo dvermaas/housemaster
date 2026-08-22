@@ -118,6 +118,8 @@ Flask + Jinja + htmx, no build step. htmx and both woff2 fonts are vendored into
 - `create_app` resolves both paths to absolute: `send_from_directory` resolves a *relative* root against the Flask package directory, not the cwd, so a relative media root silently 404s every photo.
 - The connection is per-request via `flask.g`, opened read-only. WAL lets `serve` read while `fetch` writes.
 - Design direction is "Plattegrond" (architectural drafting; mono tabular figures; the real Dutch NEN energy colours). Tokens live at the top of `web/static/app.css`.
+- **Light and dark are two halves of one idea**, not an inverted palette: a real blueprint is light lines on dark ground, so light mode is drafting vellum and dark mode is cyanotype. Three states — an explicit choice sets `data-theme` on `<html>` and wins; no attribute means the CSS follows `prefers-color-scheme`. An inline script in `<head>` applies a stored choice **before first paint**, or the wrong theme flashes. `--basemap` is a CSS token so the light/dark map style mapping lives in the stylesheet, not in JS.
+- The photo viewer is always light-on-dark whatever the page theme: a photo wants a dark surround. Gallery links keep their `href` as the no-JS fallback; `lightbox.js` only intercepts the click.
 
 ### The map view (`?view=map`)
 
@@ -128,6 +130,8 @@ Three things that will break if disturbed:
 - **The map instance is created once.** `#map` carries `hx-preserve` so a filter change only calls `source.setData(newUrl)` — rebuilding it on every swap would throw away the viewport the user panned to. Switching to the grid *does* remove the node (hx-preserve needs it in both old and new markup), so `sync()` calls `dropIfDetached()` to tear down the dead instance and free its WebGL context before making a new one.
 - **`<input type="hidden" name="view">` lives inside `#results`, not the rail.** The filter form serialises its whole subtree and `#results` is reserialised on every swap; move it to the rail and it goes stale, and filtering on the map drops you back to the grid.
 - **Bounds come from `db.map_bounds`, not from the GeoJSON.** Fitting the view by downloading the feature collection a second time both wasted a request and raced the source load.
+
+**Theme changes rebuild the map rather than restyling it.** `setStyle()` is the obvious call and it is a trap: it discards our layers, and there is no reliable moment to put them back — MapLibre 5 does not emit `style.load`, and `styledata` also fires for the *outgoing* style, so the re-add lands on a style about to be thrown away and the houses silently vanish. `retheme()` tears the map down and rebuilds it at the same camera, reusing the first-paint code path. Theme switching is rare and deliberate; a subtler mechanism is not worth the failure mode.
 
 `MAX_MAP_POINTS` caps the GeoJSON so a pathological filter cannot ship an unbounded payload. The map is the only part of the app that needs the network — OSM's tile policy forbids pre-downloading tiles, so they cannot be vendored like htmx and the fonts.
 

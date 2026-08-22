@@ -13,8 +13,18 @@
 (function () {
   "use strict";
 
-  const STYLE = "https://tiles.openfreemap.org/styles/positron";
   const DEN_HAAG = [4.3007, 52.0705];
+
+  /** Which OpenFreeMap style the current theme wants.
+   *
+   *  Read from the `--basemap` custom property rather than duplicated here, so
+   *  the light/dark mapping lives in one place: the stylesheet. */
+  function styleUrl() {
+    const name =
+      getComputedStyle(document.documentElement).getPropertyValue("--basemap").trim() ||
+      "positron";
+    return `https://tiles.openfreemap.org/styles/${name}`;
+  }
 
   // Mirrors the NEN scale in app.css. Kept in sync by hand, which is fine for
   // a closed vocabulary that has not changed since the 2021 relabelling.
@@ -50,13 +60,24 @@
         /* the provider renamed a layer; the default style still works */
       }
     };
-    tweak("background", "background-color", "#f7f7f4");
-    tweak("water", "fill-color", "#e4e8e6");
-    tweak("landcover-grass", "fill-color", "#eef0ea");
-    tweak("park", "fill-color", "#eef0ea");
+    const css = (token) =>
+      getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+    tweak("background", "background-color", css("--paper"));
+    tweak("water", "fill-color", css("--paper-sunk"));
+    tweak("landcover-grass", "fill-color", css("--paper-sunk"));
+    tweak("park", "fill-color", css("--paper-sunk"));
   }
 
+  /** Idempotent: a theme change calls this again on the new style, and
+   *  setStyle's diffing may or may not have kept the old source. Adding one
+   *  that already exists throws, which would abort before the layers land and
+   *  leave a map with no houses on it. */
   function addHouses(url) {
+    for (const id of ["houses", "houses-halo"]) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
+    if (map.getSource("houses")) map.removeSource("houses");
+
     map.addSource("houses", { type: "geojson", data: url });
 
     map.addLayer({
@@ -82,7 +103,12 @@
         "circle-stroke-opacity": 0.55,
       },
     });
+  }
 
+  /** Layer-scoped listeners survive the layer being removed and re-added, so
+   *  these are bound once per map -- binding them inside addHouses would make
+   *  every theme change add another copy and fire the popup twice. */
+  function bindHouseEvents() {
     map.on("click", "houses", (event) => showCard(event.features[0]));
     map.on("mouseenter", "houses", () => {
       map.getCanvas().style.cursor = "pointer";
@@ -142,12 +168,14 @@
     else pendingUrl = url;
   }
 
-  function init(container, url, bounds) {
+  function init(container, url, bounds, camera) {
     map = new maplibregl.Map({
       container,
-      style: STYLE,
-      center: DEN_HAAG,
-      zoom: 12,
+      style: styleUrl(),
+      center: camera ? camera.center : DEN_HAAG,
+      zoom: camera ? camera.zoom : 12,
+      bearing: camera ? camera.bearing : 0,
+      pitch: camera ? camera.pitch : 0,
       attributionControl: { compact: true },
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
@@ -156,7 +184,8 @@
     map.on("load", () => {
       styleBasemap();
       addHouses(pendingUrl || url);
-      fit(bounds);
+      bindHouseEvents();
+      if (!camera) fit(bounds);
       pendingUrl = null;
     });
   }
@@ -199,6 +228,37 @@
     }
   }
 
+  /** Swap the basemap when the theme changes.
+   *
+   *  Rebuilt rather than restyled. `setStyle()` looks like the obvious answer,
+   *  but it discards our layers and there is no reliable moment to put them
+   *  back: `style.load` is not emitted by MapLibre 5, and `styledata` also
+   *  fires for the *outgoing* style, so a re-add lands on the style that is
+   *  about to be thrown away and the houses silently vanish.
+   *
+   *  A full rebuild has one code path -- the same one first paint uses -- and
+   *  restoring the camera makes it invisible to the user. Theme changes are
+   *  rare and deliberate, so the cost is not worth a subtler mechanism. */
+  function retheme() {
+    if (!map) return;
+    const results = document.getElementById("results");
+    if (!results || results.dataset.view !== "map") return;
+
+    const camera = {
+      center: map.getCenter(),
+      zoom: map.getZoom(),
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+    };
+    const container = map.getContainer();
+    map.remove();
+    map = null;
+    popup = null;
+    pendingUrl = null;
+    init(container, results.dataset.geojson, null, camera);
+  }
+
   document.addEventListener("DOMContentLoaded", sync);
   document.body.addEventListener("htmx:afterSwap", sync);
+  document.addEventListener("housemaster:themechange", retheme);
 })();

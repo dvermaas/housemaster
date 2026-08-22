@@ -31,7 +31,8 @@
       <span>{{ house.rooms or '—' }} rooms</span>
       <span class="sep">·</span>
       <span>{{ house.bedrooms or '—' }} bed</span>
-      <span class="chip" style="--swatch: var(--e-{{ house.energy_label | energy_class }})">
+      <span class="chip" data-label="{{ house.energy_label }}"
+              style="--swatch: var(--e-{{ house.energy_label | energy_class }})">
         {{ house.energy_label or '?' }}
       </span>
     </div>

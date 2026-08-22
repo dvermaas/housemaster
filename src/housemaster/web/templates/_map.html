@@ -12,7 +12,8 @@
   <div class="maplegend">
     <span class="maplegend-title">Energy</span>
     {% for label in ["A", "B", "C", "D", "E", "F", "G"] %}
-      <span class="chip" style="--swatch: var(--e-{{ label | energy_class }})">{{ label }}</span>
+      <span class="chip" data-label="{{ label }}"
+            style="--swatch: var(--e-{{ label | energy_class }})">{{ label }}</span>
     {% endfor %}
   </div>
 
