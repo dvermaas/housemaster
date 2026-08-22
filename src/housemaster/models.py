@@ -30,7 +30,12 @@ class Listing:
     published: str
     agent: str
     url: str
-    photo_count: int
+    photo_ids: tuple[str, ...] = ()
+    """CDN paths for every photo, in funda's order. Verified to be the full set."""
+
+    @property
+    def photo_count(self) -> int:
+        return len(self.photo_ids)
 
     @property
     def price_per_m2(self) -> int | None:
@@ -40,8 +45,16 @@ class Listing:
         return round(self.price / self.living_area)
 
     def as_dict(self) -> dict[str, Any]:
-        """Serialisable form, with the derived field materialised."""
-        return {**asdict(self), "price_per_m2": self.price_per_m2}
+        """Flat serialisable form for json/csv output.
+
+        `photo_ids` is dropped in favour of its count -- a list of 39 CDN paths
+        is noise in a spreadsheet, and the pipeline reads the field directly.
+        """
+        data = asdict(self)
+        data.pop("photo_ids", None)
+        data["photo_count"] = self.photo_count
+        data["price_per_m2"] = self.price_per_m2
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,3 +68,56 @@ class SearchPage:
     @property
     def total_pages(self) -> int:
         return -(-self.total_results // PAGE_SIZE)  # ceiling division
+
+
+@dataclass(frozen=True, slots=True)
+class Feature:
+    """One row of a funda *kenmerken* table, e.g. 'Bouwjaar' / '1931-1944'."""
+
+    group_id: str
+    group_title: str
+    position: int
+    label: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Detail:
+    """The extra fields a listing's own page carries beyond the search result."""
+
+    listing_id: int
+    description: str
+    lat: float | None
+    lng: float | None
+    neighbourhood_price_m2: int | None
+    neighbourhood_inhabitants: int | None
+    features: tuple[Feature, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredPhoto:
+    """One photo that made it to disk."""
+
+    listing_id: int
+    position: int
+    width: int
+    local_path: str
+    size_bytes: int
+
+
+@dataclass(slots=True)
+class FetchReport:
+    """Counts for one `fetch` run. Mutable: the pipeline accumulates into it."""
+
+    search_url: str
+    pages_read: int = 0
+    seen: int = 0
+    new_listings: int = 0
+    price_changes: int = 0
+    status_changes: int = 0
+    delisted: int = 0
+    details_fetched: int = 0
+    photos_downloaded: int = 0
+    complete: bool = False
+    """True only when every search page was read. Gates delisted-marking."""
+    error: str | None = None

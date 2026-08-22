@@ -1,0 +1,647 @@
+"""SQLite cache for scraped listings.
+
+Deliberately knows nothing about funda or HTTP -- it takes `Listing` / `Detail`
+records and stores them. `pipeline` is the only module that touches both this
+and the network.
+
+Schema changes go through `MIGRATIONS`: append a function, never edit an
+existing one. `PRAGMA user_version` records how many have run. That is enough
+bookkeeping for a single-file local cache and avoids an Alembic dependency.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from housemaster.models import Detail, Listing, StoredPhoto
+
+DEFAULT_DB_PATH = Path("data/housemaster.db")
+MAX_PHOTO_ATTEMPTS = 3
+
+
+def utcnow() -> str:
+    """Timestamps are ISO-8601 UTC strings: SQLite has no date type, and text
+    in this format sorts chronologically."""
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+# --- schema ----------------------------------------------------------------
+
+
+def _migration_001_initial(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE listings (
+            listing_id        INTEGER PRIMARY KEY,   -- funda globalId; the stable key
+            tiny_id           TEXT,                  -- the number in the detail URL
+            url               TEXT NOT NULL,
+            address           TEXT NOT NULL,
+            postal_code       TEXT,
+            city              TEXT,
+            neighbourhood     TEXT,
+            price             INTEGER,
+            price_condition   TEXT,
+            living_area       INTEGER,
+            rooms             INTEGER,
+            bedrooms          INTEGER,
+            energy_label      TEXT,
+            object_type       TEXT,
+            construction_type TEXT,
+            status            TEXT,
+            published         TEXT,
+            agent             TEXT,
+            photo_count       INTEGER NOT NULL DEFAULT 0,
+            -- STORED, not VIRTUAL: virtual generated columns cannot be indexed,
+            -- and this is a primary sort key in the web UI.
+            price_per_m2      INTEGER GENERATED ALWAYS AS (
+                CASE WHEN price > 0 AND living_area > 0
+                     THEN price / living_area END) STORED,
+            -- detail-only; NULL until the listing has been enriched
+            description               TEXT,
+            lat                       REAL,
+            lng                       REAL,
+            neighbourhood_price_m2    INTEGER,
+            neighbourhood_inhabitants INTEGER,
+            detail_fetched_at         TEXT,
+            first_seen_at     TEXT NOT NULL,
+            last_seen_at      TEXT NOT NULL,
+            missed_runs       INTEGER NOT NULL DEFAULT 0,
+            -- "stopped appearing in this search", NOT "sold": a price rise past
+            -- the search ceiling also triggers it. The UI must not say "sold".
+            delisted_at       TEXT
+        ) STRICT;
+
+        CREATE TABLE features (
+            listing_id  INTEGER NOT NULL REFERENCES listings ON DELETE CASCADE,
+            group_id    TEXT NOT NULL,
+            group_title TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            label       TEXT NOT NULL,
+            value       TEXT,
+            PRIMARY KEY (listing_id, group_id, position)
+        ) STRICT, WITHOUT ROWID;
+
+        CREATE TABLE photos (
+            listing_id    INTEGER NOT NULL REFERENCES listings ON DELETE CASCADE,
+            position      INTEGER NOT NULL,
+            image_id      TEXT NOT NULL,   -- CDN path, straight from search results
+            width         INTEGER,
+            local_path    TEXT,            -- NULL until downloaded
+            bytes         INTEGER,
+            downloaded_at TEXT,
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT,
+            PRIMARY KEY (listing_id, position)
+        ) STRICT, WITHOUT ROWID;
+
+        CREATE TABLE price_history (
+            -- A surrogate key, not (listing_id, observed_at): timestamps are
+            -- second-granular and one run stamps every row with the same value,
+            -- so a composite key would silently swallow a change observed in the
+            -- same second as an earlier one.
+            id          INTEGER PRIMARY KEY,
+            listing_id  INTEGER NOT NULL REFERENCES listings ON DELETE CASCADE,
+            observed_at TEXT NOT NULL,
+            price       INTEGER,
+            status      TEXT
+        ) STRICT;
+
+        CREATE TABLE fetch_runs (
+            run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            search_url        TEXT NOT NULL,
+            started_at        TEXT NOT NULL,
+            finished_at       TEXT,
+            pages_read        INTEGER NOT NULL DEFAULT 0,
+            seen              INTEGER NOT NULL DEFAULT 0,
+            new_listings      INTEGER NOT NULL DEFAULT 0,
+            price_changes     INTEGER NOT NULL DEFAULT 0,
+            status_changes    INTEGER NOT NULL DEFAULT 0,
+            delisted          INTEGER NOT NULL DEFAULT 0,
+            details_fetched   INTEGER NOT NULL DEFAULT 0,
+            photos_downloaded INTEGER NOT NULL DEFAULT 0,
+            complete          INTEGER NOT NULL DEFAULT 0,
+            error             TEXT
+        ) STRICT;
+
+        -- The UI's default view hides delisted houses, so the hot indexes are
+        -- partial ones scoped to that predicate.
+        CREATE INDEX idx_listings_price ON listings(price)
+            WHERE delisted_at IS NULL;
+        CREATE INDEX idx_listings_area ON listings(living_area)
+            WHERE delisted_at IS NULL;
+        CREATE INDEX idx_listings_ppm2 ON listings(price_per_m2)
+            WHERE delisted_at IS NULL;
+        CREATE INDEX idx_listings_hood   ON listings(neighbourhood);
+        CREATE INDEX idx_listings_label  ON listings(energy_label);
+        CREATE INDEX idx_listings_seen   ON listings(first_seen_at DESC);
+        CREATE INDEX idx_history_listing ON price_history(listing_id, observed_at DESC);
+    """)
+
+
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_migration_001_initial,)
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Bring a database up to the current schema. Safe to call every time."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    for index, migration in enumerate(MIGRATIONS[version:], start=version + 1):
+        with conn:
+            migration(conn)
+            # PRAGMA cannot be parameterised, but `index` is a loop counter over
+            # a module constant -- never user input.
+            conn.execute(f"PRAGMA user_version = {index}")
+    return len(MIGRATIONS)
+
+
+def connect(
+    path: str | Path = DEFAULT_DB_PATH, *, read_only: bool = False
+) -> sqlite3.Connection:
+    """Open the cache. Writers migrate; readers assume a migrated database.
+
+    WAL lets `serve` read while `fetch` writes.
+    """
+    path = Path(path)
+    if read_only:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    if not read_only:
+        conn.execute("PRAGMA journal_mode = WAL")
+        migrate(conn)
+    return conn
+
+
+# --- writing ---------------------------------------------------------------
+
+_LISTING_COLUMNS = (
+    "tiny_id", "url", "address", "postal_code", "city", "neighbourhood",
+    "price", "price_condition", "living_area", "rooms", "bedrooms",
+    "energy_label", "object_type", "construction_type", "status", "published",
+    "agent", "photo_count",
+)  # fmt: skip
+
+
+def _tiny_id(url: str) -> str:
+    """The number in a detail URL -- a different id space from globalId."""
+    return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+
+
+def upsert_listing(
+    conn: sqlite3.Connection, listing: Listing, *, now: str | None = None
+) -> str:
+    """Insert or refresh one listing.
+
+    Returns what happened: "new", "price", "status", or "seen". A price or
+    status change also appends a `price_history` row -- an unchanged listing
+    appends nothing, so the history stays a log of changes rather than of runs.
+    """
+    now = now or utcnow()
+    previous = conn.execute(
+        "SELECT price, status FROM listings WHERE listing_id = ?", (listing.listing_id,)
+    ).fetchone()
+
+    values = {
+        "listing_id": listing.listing_id,
+        "tiny_id": _tiny_id(listing.url),
+        "url": listing.url,
+        "address": listing.address,
+        "postal_code": listing.postal_code,
+        "city": listing.city,
+        "neighbourhood": listing.neighbourhood,
+        "price": listing.price,
+        "price_condition": listing.price_condition,
+        "living_area": listing.living_area,
+        "rooms": listing.rooms,
+        "bedrooms": listing.bedrooms,
+        "energy_label": listing.energy_label,
+        "object_type": listing.object_type,
+        "construction_type": listing.construction_type,
+        "status": listing.status,
+        "published": listing.published,
+        "agent": listing.agent,
+        "photo_count": listing.photo_count,
+        "now": now,
+    }
+
+    if previous is None:
+        # Interpolated names come from _LISTING_COLUMNS, a module constant; every
+        # value is bound by name from `values`.
+        columns = ", ".join(_LISTING_COLUMNS)
+        placeholders = ", ".join(f":{name}" for name in _LISTING_COLUMNS)
+        conn.execute(
+            f"INSERT INTO listings (listing_id, {columns}, "  # noqa: S608
+            f"first_seen_at, last_seen_at) "
+            f"VALUES (:listing_id, {placeholders}, :now, :now)",
+            values,
+        )
+        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
+        _replace_photo_ids(conn, listing.listing_id, listing.photo_ids)
+        return "new"
+
+    assignments = ", ".join(f"{name} = :{name}" for name in _LISTING_COLUMNS)
+    conn.execute(
+        f"UPDATE listings SET {assignments}, "  # noqa: S608
+        "last_seen_at = :now, delisted_at = NULL WHERE listing_id = :listing_id",
+        values,
+    )
+    _replace_photo_ids(conn, listing.listing_id, listing.photo_ids)
+
+    if previous["price"] != listing.price:
+        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
+        return "price"
+    if previous["status"] != listing.status:
+        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
+        return "status"
+    return "seen"
+
+
+def _record_observation(
+    conn: sqlite3.Connection, listing_id: int, now: str, price: int | None, status: str
+) -> None:
+    # Dedupe is the caller's job: upsert_listing only calls this on an actual
+    # change, so every row here is a real observation.
+    conn.execute(
+        "INSERT INTO price_history (listing_id, observed_at, price, status) "
+        "VALUES (?, ?, ?, ?)",
+        (listing_id, now, price, status),
+    )
+
+
+def _replace_photo_ids(
+    conn: sqlite3.Connection, listing_id: int, photo_ids: Sequence[str]
+) -> None:
+    """Register the CDN paths without disturbing what has already been downloaded."""
+    conn.executemany(
+        "INSERT INTO photos (listing_id, position, image_id) VALUES (?, ?, ?) "
+        "ON CONFLICT (listing_id, position) DO UPDATE SET image_id = excluded.image_id",
+        [(listing_id, position, image_id) for position, image_id in enumerate(photo_ids)],
+    )
+
+
+def save_detail(
+    conn: sqlite3.Connection, detail: Detail, *, now: str | None = None
+) -> None:
+    """Store the detail-page fields and replace that listing's kenmerken."""
+    conn.execute(
+        "UPDATE listings SET description = ?, lat = ?, lng = ?, "
+        "neighbourhood_price_m2 = ?, neighbourhood_inhabitants = ?, "
+        "detail_fetched_at = ? WHERE listing_id = ?",
+        (
+            detail.description,
+            detail.lat,
+            detail.lng,
+            detail.neighbourhood_price_m2,
+            detail.neighbourhood_inhabitants,
+            now or utcnow(),
+            detail.listing_id,
+        ),
+    )
+    conn.execute("DELETE FROM features WHERE listing_id = ?", (detail.listing_id,))
+    conn.executemany(
+        "INSERT INTO features "
+        "(listing_id, group_id, group_title, position, label, value) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (detail.listing_id, f.group_id, f.group_title, f.position, f.label, f.value)
+            for f in detail.features
+        ],
+    )
+
+
+MISS_THRESHOLD = 2
+"""Consecutive absences before a listing counts as gone. See reconcile_presence."""
+
+
+def reconcile_presence(
+    conn: sqlite3.Connection, seen: set[int], *, now: str, threshold: int = MISS_THRESHOLD
+) -> int:
+    """Track which listings stopped appearing, and delist after two strikes.
+
+    Funda pages a *live* result set: `&search_result=N` re-sorts under us, so a
+    listing inserted while we page shifts everything down and one listing per
+    page boundary can be skipped entirely. A single absence is therefore not
+    evidence of anything, which is why delisting needs two consecutive misses.
+
+    Callers MUST only run this after a complete page walk -- doing it after a
+    partial run would mark every unread page's listings as gone.
+
+    Returns the number newly delisted. Nothing is ever deleted.
+    """
+    conn.execute(
+        "UPDATE listings SET missed_runs = missed_runs + 1 WHERE delisted_at IS NULL"
+    )
+    if seen:
+        placeholders = ", ".join("?" * len(seen))
+        conn.execute(
+            # Names are placeholders, values are bound.
+            f"UPDATE listings SET last_seen_at = ?, missed_runs = 0, "  # noqa: S608
+            f"delisted_at = NULL WHERE listing_id IN ({placeholders})",
+            [now, *seen],
+        )
+    cursor = conn.execute(
+        "UPDATE listings SET delisted_at = ? "
+        "WHERE delisted_at IS NULL AND missed_runs >= ?",
+        (now, threshold),
+    )
+    return cursor.rowcount
+
+
+def record_photo_failure(
+    conn: sqlite3.Connection, listing_id: int, position: int, error: str
+) -> None:
+    """Count a failed attempt so a permanently dead image stops being retried."""
+    conn.execute(
+        "UPDATE photos SET attempts = attempts + 1, last_error = ? "
+        "WHERE listing_id = ? AND position = ?",
+        (error[:200], listing_id, position),
+    )
+
+
+def record_photo(conn: sqlite3.Connection, photo: StoredPhoto) -> None:
+    """Mark one photo as cached on disk."""
+    conn.execute(
+        "UPDATE photos SET width = ?, local_path = ?, bytes = ?, downloaded_at = ? "
+        "WHERE listing_id = ? AND position = ?",
+        (
+            photo.width,
+            photo.local_path,
+            photo.size_bytes,
+            utcnow(),
+            photo.listing_id,
+            photo.position,
+        ),
+    )
+
+
+# --- run bookkeeping -------------------------------------------------------
+
+
+def start_run(conn: sqlite3.Connection, search_url: str, started_at: str) -> int:
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO fetch_runs (search_url, started_at) VALUES (?, ?)",
+            (search_url, started_at),
+        )
+    return int(cursor.lastrowid or 0)
+
+
+def finish_run(conn: sqlite3.Connection, run_id: int, report: Any) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE fetch_runs SET finished_at = ?, pages_read = ?, seen = ?, "
+            "new_listings = ?, price_changes = ?, status_changes = ?, delisted = ?, "
+            "details_fetched = ?, photos_downloaded = ?, complete = ?, error = ? "
+            "WHERE run_id = ?",
+            (
+                utcnow(),
+                report.pages_read,
+                report.seen,
+                report.new_listings,
+                report.price_changes,
+                report.status_changes,
+                report.delisted,
+                report.details_fetched,
+                report.photos_downloaded,
+                int(report.complete),
+                report.error,
+                run_id,
+            ),
+        )
+
+
+# --- reading ---------------------------------------------------------------
+
+
+def listings_needing_detail(
+    conn: sqlite3.Connection, limit: int | None = None
+) -> list[sqlite3.Row]:
+    """Driven by what the database lacks, not by what this run saw -- which is
+    what makes an interrupted fetch resumable by simply running it again."""
+    return conn.execute(
+        "SELECT listing_id, url FROM listings "
+        "WHERE detail_fetched_at IS NULL AND delisted_at IS NULL "
+        "ORDER BY first_seen_at LIMIT ?",
+        (-1 if limit is None else limit,),  # SQLite reads a negative LIMIT as "all"
+    ).fetchall()
+
+
+def photos_needing_download(
+    conn: sqlite3.Connection, per_listing: int, limit: int | None = None
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT listing_id, position, image_id FROM photos "
+        "WHERE local_path IS NULL AND position < ? AND attempts < ? "
+        "ORDER BY listing_id, position LIMIT ?",
+        (per_listing, MAX_PHOTO_ATTEMPTS, -1 if limit is None else limit),
+    ).fetchall()
+
+
+def get_listing(conn: sqlite3.Connection, listing_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT *, {_CARD_EXTRAS} FROM listings WHERE listing_id = ?",  # noqa: S608
+        (listing_id,),
+    ).fetchone()
+
+
+def get_features(conn: sqlite3.Connection, listing_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM features WHERE listing_id = ? ORDER BY group_id, position",
+        (listing_id,),
+    ).fetchall()
+
+
+def get_photos(conn: sqlite3.Connection, listing_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM photos WHERE listing_id = ? ORDER BY position", (listing_id,)
+    ).fetchall()
+
+
+def get_price_history(conn: sqlite3.Connection, listing_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM price_history WHERE listing_id = ? ORDER BY observed_at, id",
+        (listing_id,),
+    ).fetchall()
+
+
+def latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM fetch_runs ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+
+
+def counts(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute("""
+        SELECT COUNT(*) AS total,
+               SUM(delisted_at IS NULL)      AS active,
+               SUM(detail_fetched_at IS NOT NULL) AS enriched
+        FROM listings
+    """).fetchone()
+    photos = conn.execute(
+        "SELECT COUNT(*) AS cached FROM photos WHERE local_path IS NOT NULL"
+    ).fetchone()
+    return {
+        "total": row["total"] or 0,
+        "active": row["active"] or 0,
+        "enriched": row["enriched"] or 0,
+        "photos": photos["cached"] or 0,
+    }
+
+
+def distinct_neighbourhoods(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT neighbourhood FROM listings "
+        "WHERE neighbourhood <> '' AND delisted_at IS NULL ORDER BY neighbourhood"
+    ).fetchall()
+    return [row["neighbourhood"] for row in rows]
+
+
+# --- the web UI's query ----------------------------------------------------
+
+# (column, direction). Kept apart so the NULLs-last prefix can reference the
+# bare column -- `ORDER BY price ASC IS NULL` is a syntax error.
+SORTS: dict[str, tuple[str, str]] = {
+    # Funda's publication date, not first_seen_at: every house in a freshly
+    # built cache shares one first_seen_at, so that would order them randomly.
+    "newest": ("published", "DESC"),
+    "oldest": ("published", "ASC"),
+    "added": ("first_seen_at", "DESC"),
+    "price_asc": ("price", "ASC"),
+    "price_desc": ("price", "DESC"),
+    "ppm2_asc": ("price_per_m2", "ASC"),
+    "ppm2_desc": ("price_per_m2", "DESC"),
+    "area_desc": ("living_area", "DESC"),
+    "area_asc": ("living_area", "ASC"),
+}
+DEFAULT_SORT = "newest"
+
+
+@dataclass(frozen=True, slots=True)
+class Filters:
+    """Everything the browse page can narrow by. All fields optional."""
+
+    q: str = ""
+    price_min: int | None = None
+    price_max: int | None = None
+    area_min: int | None = None
+    area_max: int | None = None
+    rooms_min: int | None = None
+    beds_min: int | None = None
+    labels: tuple[str, ...] = ()
+    hoods: tuple[str, ...] = ()
+    status: str = ""
+    include_delisted: bool = False
+    sort: str = DEFAULT_SORT
+
+
+_CARD_EXTRAS = """
+    (SELECT p.local_path FROM photos p
+      WHERE p.listing_id = listings.listing_id AND p.local_path IS NOT NULL
+      ORDER BY p.position LIMIT 1) AS thumb,
+    (SELECT p.image_id FROM photos p
+      WHERE p.listing_id = listings.listing_id
+      ORDER BY p.position LIMIT 1) AS first_image,
+    (SELECT h.price FROM price_history h
+      WHERE h.listing_id = listings.listing_id AND h.price > listings.price
+      ORDER BY h.price DESC LIMIT 1) AS price_was
+"""
+"""Per-card extras: first cached photo, first CDN id as fallback, and the
+highest earlier price if this house has come down."""
+
+
+def _where(filters: Filters) -> tuple[str, list[Any]]:
+    """Build the WHERE clause. Every value is bound, never interpolated."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if not filters.include_delisted:
+        clauses.append("delisted_at IS NULL")
+    if filters.q:
+        clauses.append("(address LIKE ? OR neighbourhood LIKE ? OR description LIKE ?)")
+        params += [f"%{filters.q}%"] * 3
+
+    for column, value, op in (
+        ("price", filters.price_min, ">="),
+        ("price", filters.price_max, "<="),
+        ("living_area", filters.area_min, ">="),
+        ("living_area", filters.area_max, "<="),
+        ("rooms", filters.rooms_min, ">="),
+        ("bedrooms", filters.beds_min, ">="),
+    ):
+        if value is not None:
+            clauses.append(f"{column} {op} ?")
+            params.append(value)
+
+    for column, values in (
+        ("energy_label", filters.labels),
+        ("neighbourhood", filters.hoods),
+    ):
+        if values:
+            clauses.append(f"{column} IN ({', '.join('?' * len(values))})")
+            params += list(values)
+
+    if filters.status:
+        clauses.append("status = ?")
+        params.append(filters.status)
+
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
+
+
+def query_listings(
+    conn: sqlite3.Connection, filters: Filters, *, limit: int = 30, offset: int = 0
+) -> list[sqlite3.Row]:
+    where, params = _where(filters)
+    # Both interpolations are internally controlled: `where` is assembled from a
+    # fixed column list with `?` placeholders for every value, and `order` is a
+    # lookup in SORTS with a default. No caller string reaches the SQL text.
+    column, direction = SORTS.get(filters.sort, SORTS[DEFAULT_SORT])
+    # `col IS NULL` first puts houses missing that value last in either
+    # direction; listing_id breaks ties so paging can never repeat a row.
+    #
+    # The three subqueries give each card its thumbnail and price-drop marker in
+    # one round trip instead of N+1 lookups from the template.
+    return conn.execute(
+        f"SELECT *, {_CARD_EXTRAS} FROM listings{where} "  # noqa: S608
+        f"ORDER BY {column} IS NULL, {column} {direction}, listing_id "
+        "LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
+
+
+def count_listings(conn: sqlite3.Connection, filters: Filters) -> int:
+    where, params = _where(filters)
+    row = conn.execute(f"SELECT COUNT(*) FROM listings{where}", params).fetchone()  # noqa: S608
+    return int(row[0])
+
+
+def price_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Range for the filter sliders, from the data rather than hardcoded."""
+    row = conn.execute(
+        "SELECT MIN(price) AS lo, MAX(price) AS hi FROM listings "
+        "WHERE price > 0 AND delisted_at IS NULL"
+    ).fetchone()
+    return (row["lo"] or 0, row["hi"] or 0)
+
+
+def area_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
+    row = conn.execute(
+        "SELECT MIN(living_area) AS lo, MAX(living_area) AS hi FROM listings "
+        "WHERE living_area > 0 AND delisted_at IS NULL"
+    ).fetchone()
+    return (row["lo"] or 0, row["hi"] or 0)
+
+
+def label_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT energy_label, COUNT(*) AS n FROM listings "
+        "WHERE delisted_at IS NULL GROUP BY energy_label"
+    ).fetchall()
+    return {row["energy_label"]: row["n"] for row in rows}

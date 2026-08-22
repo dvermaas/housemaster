@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}{{ listing.address }} — HouseMaster{% endblock %}
+
+{% block content %}
+<div class="detail">
+  <a class="back" href="{{ url_for('browse.index') }}">← All houses</a>
+
+  <h1>{{ listing.address }}</h1>
+  <div class="where">
+    {{ listing.postal_code }} {{ listing.city }}{% if listing.neighbourhood %} · {{ listing.neighbourhood }}{% endif %}
+  </div>
+
+  <div class="headline">
+    <span class="price">{{ listing.price | euro }}</span>
+    <span class="fig" style="color: var(--ink-soft)">{{ listing.price_condition | replace('_', ' ') }}</span>
+    <span class="fig">{{ listing.price_per_m2 | euro }}/m²</span>
+    <span class="fig">{{ listing.living_area or '—' }} m²</span>
+    <span class="fig">{{ listing.rooms or '—' }} rooms · {{ listing.bedrooms or '—' }} bed</span>
+    <span class="chip" style="--swatch: var(--e-{{ listing.energy_label | energy_class }})">
+      {{ listing.energy_label or '?' }}
+    </span>
+    {% if listing.status and listing.status != 'none' %}
+      <span class="badge offer">{{ status_label(listing.status) }}</span>
+    {% endif %}
+    {% if listing.delisted_at %}
+      {# Honest wording: it stopped matching this search, which is not the
+         same as sold -- a price rise past the ceiling does it too. #}
+      <span class="badge gone">no longer in this search</span>
+    {% endif %}
+  </div>
+
+  {% macro shot(photo, index) %}
+    {% set src = url_for('browse.media_file', filename=photo.local_path)
+                 if photo.local_path else photo_url(photo.image_id, 720) %}
+    <a href="{{ photo_url(photo.image_id, 1440) }}" target="_blank" rel="noopener">
+      <img src="{{ src }}" alt="Photo {{ index }} of {{ listing.address }}"
+           loading="{{ 'eager' if index <= 3 else 'lazy' }}" decoding="async">
+    </a>
+  {% endmacro %}
+
+  {% if photos %}
+  {# Only the first few up front. A 39-photo wall pushes the description and
+     kenmerken -- the reason to open this page -- thousands of pixels down. #}
+  <div class="gallery">
+    {% for photo in photos[:GALLERY_PREVIEW] %}{{ shot(photo, loop.index) }}{% endfor %}
+  </div>
+  {% if photos | length > GALLERY_PREVIEW %}
+    <details class="more-photos">
+      <summary>{{ photos | length - GALLERY_PREVIEW }} more photos</summary>
+      <div class="gallery rest">
+        {% for photo in photos[GALLERY_PREVIEW:] %}
+          {{ shot(photo, loop.index + GALLERY_PREVIEW) }}
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+  {% endif %}
+
+  {% if listing.description %}
+  <section>
+    <h2>Omschrijving</h2>
+    <div class="prose">{{ listing.description }}</div>
+  </section>
+  {% endif %}
+
+  {% if features %}
+  <section>
+    <h2>Kenmerken</h2>
+    <div class="kenmerken">
+      {# Funda's own grouping and ordering, preserved end to end. #}
+      {% for group_title, rows in features | groupby('group_title') %}
+        <div>
+          <h3>{{ group_title }}</h3>
+          <dl>
+            {% for row in rows %}
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            {% endfor %}
+          </dl>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if history | length > 1 %}
+  <section>
+    <h2>Price history</h2>
+    <table class="history">
+      {% set ns = namespace(previous=None) %}
+      {% for row in history %}
+        <tr>
+          <td>{{ row.observed_at[:10] }}</td>
+          <td>{{ row.price | euro }}</td>
+          <td class="{{ 'down' if ns.previous and row.price < ns.previous
+                        else 'up' if ns.previous and row.price > ns.previous else '' }}">
+            {% if ns.previous and row.price != ns.previous %}
+              {{ '−' if row.price < ns.previous else '+' }}{{ (row.price - ns.previous) | abs | euro }}
+            {% endif %}
+          </td>
+          <td style="color: var(--ink-soft)">{{ status_label(row.status) }}</td>
+        </tr>
+        {% set ns.previous = row.price %}
+      {% endfor %}
+    </table>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Context</h2>
+    <div class="kenmerken">
+      <div>
+        <h3>Buurt</h3>
+        <dl>
+          {% if listing.neighbourhood_price_m2 %}
+            <dt>Average asking price</dt>
+            <dd>{{ listing.neighbourhood_price_m2 | euro }}/m²</dd>
+            <dt>This house</dt>
+            <dd>{{ listing.price_per_m2 | euro }}/m²</dd>
+          {% endif %}
+          {% if listing.neighbourhood_inhabitants %}
+            <dt>Inhabitants</dt>
+            <dd>{{ listing.neighbourhood_inhabitants | compact }}</dd>
+          {% endif %}
+        </dl>
+      </div>
+      <div>
+        <h3>Listing</h3>
+        <dl>
+          <dt>Agent</dt><dd>{{ listing.agent }}</dd>
+          <dt>Published</dt><dd>{{ listing.published }}</dd>
+          <dt>First seen</dt><dd>{{ listing.first_seen_at | since }}</dd>
+          <dt>On funda</dt>
+          <dd><a href="{{ listing.url }}" target="_blank" rel="noopener"
+                 style="color: var(--blueprint); text-decoration: underline">open ↗</a></dd>
+          {% if listing.lat %}
+            <dt>Map</dt>
+            <dd><a href="https://www.google.com/maps/search/?api=1&query={{ listing.lat }},{{ listing.lng }}"
+                   target="_blank" rel="noopener"
+                   style="color: var(--blueprint); text-decoration: underline">open ↗</a></dd>
+          {% endif %}
+        </dl>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}

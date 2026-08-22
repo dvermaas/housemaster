@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from housemaster import __version__
+from housemaster import __version__, db, media
 from housemaster.funda import (
     DEFAULT_SEARCH_URL,
     PAGE_SIZE,
@@ -14,12 +16,22 @@ from housemaster.funda import (
     fetch_search_page,
     iter_all_listings,
 )
+from housemaster.pipeline import (
+    DEFAULT_PACE,
+    DEFAULT_PHOTOS_PER_LISTING,
+    FetchOptions,
+)
+from housemaster.pipeline import run_fetch as run_pipeline
 from housemaster.render import (
     render_csv,
+    render_fetch_report,
     render_json,
     render_listings_text,
     render_page_text,
+    render_status,
 )
+
+DEFAULT_PORT = 8765
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -78,7 +90,150 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search.set_defaults(handler=run_search)
 
+    fetch = subparsers.add_parser(
+        "fetch",
+        help="scrape a funda search into the local cache",
+        description=(
+            "Scrape into SQLite. Already-known houses are not re-fetched, but "
+            "their price and status are refreshed and changes are recorded."
+        ),
+    )
+    fetch.add_argument("--url", default=DEFAULT_SEARCH_URL, help="funda search URL")
+    fetch.add_argument("--db", default=None, metavar="PATH", help="database file")
+    fetch.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop after N search pages (also suppresses delisting)",
+    )
+    fetch.add_argument(
+        "--max-details",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fetch at most N detail pages, to slice a long first run",
+    )
+    fetch.add_argument(
+        "--photos-per-house",
+        type=int,
+        default=DEFAULT_PHOTOS_PER_LISTING,
+        metavar="N",
+        help="photos to cache per house (default: %(default)s; 0 disables)",
+    )
+    fetch.add_argument(
+        "--photo-width",
+        type=int,
+        default=media.DEFAULT_WIDTH,
+        metavar="PX",
+        help=f"CDN width, rounded up to one of {media.WIDTHS} (default: %(default)s)",
+    )
+    fetch.add_argument("--no-detail", action="store_true", help="skip detail pages")
+    fetch.add_argument("--no-photos", action="store_true", help="skip photo downloads")
+    fetch.add_argument(
+        "--pace",
+        type=float,
+        default=DEFAULT_PACE,
+        metavar="SECONDS",
+        help="delay between funda requests (default: %(default)s)",
+    )
+    fetch.add_argument("--quiet", action="store_true", help="only print the summary")
+    fetch.set_defaults(handler=run_fetch)
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="browse the cached houses in a web UI",
+    )
+    serve.add_argument("--db", default=None, metavar="PATH", help="database file")
+    serve.add_argument("--host", default="127.0.0.1", help="default: %(default)s")
+    serve.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="default: %(default)s"
+    )
+    serve.add_argument("--debug", action="store_true", help="Flask debug mode")
+    serve.set_defaults(handler=run_serve)
+
+    status = subparsers.add_parser("status", help="what the cache currently holds")
+    status.add_argument("--db", default=None, metavar="PATH", help="database file")
+    status.set_defaults(handler=run_status)
+
     return parser
+
+
+def _db_path(args: argparse.Namespace) -> Path:
+    """--db beats $HOUSEMASTER_DB beats the default."""
+    return Path(args.db or os.environ.get("HOUSEMASTER_DB") or db.DEFAULT_DB_PATH)
+
+
+def _media_root(db_path: Path) -> Path:
+    """Beside the database: a cache without its images is not much use, so one
+    path should move both."""
+    return db_path.parent / "media"
+
+
+def run_fetch(args: argparse.Namespace) -> int:
+    path = _db_path(args)
+    options = FetchOptions(
+        search_url=args.url,
+        max_pages=args.max_pages,
+        max_details=args.max_details,
+        photos_per_listing=args.photos_per_house,
+        photo_width=args.photo_width,
+        with_detail=not args.no_detail,
+        with_photos=not args.no_photos,
+        pace=args.pace,
+    )
+
+    def progress(message: str) -> None:
+        print(message, file=sys.stderr)
+
+    print(f"database: {path}", file=sys.stderr)
+    conn = db.connect(path)
+    try:
+        report = run_pipeline(
+            conn,
+            _media_root(path),
+            options,
+            progress=_noop_progress if args.quiet else progress,
+        )
+        print(render_fetch_report(report, db.counts(conn)))
+    finally:
+        conn.close()
+    return EXIT_ERROR if report.error else EXIT_OK
+
+
+def _noop_progress(_message: str) -> None:
+    return None
+
+
+def run_status(args: argparse.Namespace) -> int:
+    path = _db_path(args)
+    if not path.exists():
+        print(f"No cache at {path}. Run `housemaster fetch` to create one.")
+        return EXIT_OK
+    conn = db.connect(path, read_only=True)
+    try:
+        print(render_status(str(path), db.counts(conn), db.latest_run(conn)))
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def run_serve(args: argparse.Namespace) -> int:
+    path = _db_path(args)
+    if not path.exists():
+        # Opening a missing SQLite file read-only says "unable to open database
+        # file", which explains nothing.
+        print(f"No cache at {path}.", file=sys.stderr)
+        print("Run `housemaster fetch` first to populate it.", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Imported here so `search` and `fetch` never pay Flask's import cost.
+    from housemaster.web import create_app  # noqa: PLC0415
+
+    app = create_app(path, _media_root(path))
+    print(f"HouseMaster on http://{args.host}:{args.port}", file=sys.stderr)
+    app.run(host=args.host, port=args.port, debug=args.debug)
+    return EXIT_OK
 
 
 def run_search(args: argparse.Namespace) -> int:

@@ -11,7 +11,7 @@ import io
 import json
 from collections.abc import Iterable, Sequence
 
-from housemaster.models import Listing, SearchPage
+from housemaster.models import FetchReport, Listing, SearchPage
 
 RULE_WIDTH = 100
 
@@ -113,3 +113,52 @@ def render_csv(listings: Iterable[Listing]) -> str:
     writer.writeheader()
     writer.writerows(rows)
     return buffer.getvalue()
+
+
+def render_fetch_report(report: FetchReport, counts: dict[str, int]) -> str:
+    """Summary printed after `housemaster fetch`."""
+    lines = ["", "=" * RULE_WIDTH]
+    if report.error:
+        lines.append(f"run INCOMPLETE: {report.error}")
+    changes = [
+        f"{report.new_listings} new",
+        f"{report.price_changes} price changes",
+        f"{report.status_changes} status changes",
+        f"{report.delisted} delisted",
+    ]
+    lines += [
+        f"pages {report.pages_read}  |  {report.seen} listings seen  |  "
+        + "  |  ".join(changes),
+        f"details fetched {report.details_fetched}  |  photos downloaded {report.photos_downloaded}",
+        "",
+        f"cache: {counts['active']} active of {counts['total']} listings, "
+        f"{counts['enriched']} enriched, {counts['photos']} photos on disk",
+    ]
+    return "\n".join(lines)
+
+
+def render_status(db_path: str, counts: dict[str, int], run: object | None) -> str:
+    """Summary printed by `housemaster status`."""
+    lines = [
+        "",
+        f"database   {db_path}",
+        f"listings   {counts['active']} active, {counts['total']} total",
+        f"enriched   {counts['enriched']} with detail pages",
+        f"photos     {counts['photos']} cached",
+    ]
+    if run is None:
+        lines.append("last run   never -- run `housemaster fetch` to populate the cache")
+    else:
+        # A capped run is not a failed one: only an error means something broke.
+        if run["error"]:
+            state = "failed"
+        elif run["complete"]:
+            state = "complete"
+        else:
+            state = "partial"
+        lines.append(
+            f"last run   {run['started_at']}  ({state}, {run['pages_read']} pages)"
+        )
+        if run["error"]:
+            lines.append(f"           {run['error']}")
+    return "\n".join(lines)

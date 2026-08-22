@@ -67,6 +67,42 @@ def search_state(raw_listing: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@pytest.fixture
+def detail_state() -> dict[str, Any]:
+    """A decoded detail page. The localInsights key embeds city/neighbourhood,
+    which is why the extractor has to search for it by prefix."""
+    return {
+        "data": {
+            "cachedListingData_nl": {
+                "globalId": 8116828,
+                "description": {"title": "Omschrijving", "content": "Spoorwijk. Keurig."},
+                "coordinates": {"lat": 52.050217, "lng": 4.3105555},
+                "features": [
+                    {
+                        "Id": "overdracht",
+                        "Title": "Overdracht",
+                        "KenmerkenList": [
+                            {"Label": "Vraagprijs", "Value": "€ 289.500 kosten koper"},
+                            {"Label": "Status", "Value": "Beschikbaar"},
+                        ],
+                    },
+                    {
+                        "Id": "bouw",
+                        "Title": "Bouw",
+                        "KenmerkenList": [{"Label": "Bouwjaar", "Value": "1931-1944"}],
+                    },
+                ],
+            },
+            "localInsights-den-haag/spoorwijk": {
+                "city": "Den Haag",
+                "neighbourhood": "Spoorwijk",
+                "inhabitants": 3820,
+                "averageAskingPricePerM2": 3929,
+            },
+        }
+    }
+
+
 def wrap_payload(payload: list[Any]) -> str:
     """Embed a devalue payload the way Nuxt does, for extractor tests."""
     return (

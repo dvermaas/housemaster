@@ -14,18 +14,18 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from curl_cffi import requests
-
+from housemaster import net
 from housemaster.devalue import parse
-from housemaster.models import PAGE_SIZE, Listing, SearchPage
+from housemaster.models import PAGE_SIZE, Detail, Feature, Listing, SearchPage
 
 BASE_URL = "https://www.funda.nl"
 DEFAULT_SEARCH_URL = (
     "https://www.funda.nl/zoeken/koop"
     "?selected_area=den-haag&price=250000-350000&floor_area=60-"
 )
-IMPERSONATE = "chrome"
-DEFAULT_TIMEOUT = 30
+# Re-exported so callers keep importing them from here.
+IMPERSONATE = net.IMPERSONATE
+DEFAULT_TIMEOUT = net.DEFAULT_TIMEOUT
 
 _NUXT_RE = re.compile(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL)
 
@@ -49,9 +49,7 @@ def fetch_html(url: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         BlockedError: the response lacks the SSR payload, so it is the Akamai
             interstitial -- which is served with HTTP 200, hence this check.
     """
-    response = requests.get(url, impersonate=IMPERSONATE, timeout=timeout)
-    response.raise_for_status()
-    html = response.text
+    html = net.get_text(url, timeout=timeout)
     # The bot wall answers 200, so the status code proves nothing -- the SSR
     # payload only exists on a genuine page.
     if "__NUXT_DATA__" not in html:
@@ -114,7 +112,9 @@ def to_listing(raw: dict[str, Any]) -> Listing:
         published=(raw.get("publish_date") or "")[:10],
         agent=(agents[0].get("name", "").strip() if agents else ""),
         url=f"{BASE_URL}{relative_url}" if relative_url else "",
-        photo_count=len(raw.get("photo_image_id") or []),
+        # Search results carry every photo id, in order -- no detail request is
+        # needed for photos. See media.photo_url for how these become URLs.
+        photo_ids=tuple(raw.get("photo_image_id") or ()),
     )
 
 
@@ -135,9 +135,60 @@ def to_search_page(state: Any) -> SearchPage:
     )
 
 
+def _local_insights(state: dict[str, Any]) -> dict[str, Any]:
+    """Find the neighbourhood block, whose key embeds the city and neighbourhood.
+
+    The key looks like `localInsights-den-haag/spoorwijk`, so it cannot be
+    looked up directly without reconstructing funda's slug rules.
+    """
+    data = state.get("data") or {}
+    for key, value in data.items():
+        if key.startswith("localInsights-") and isinstance(value, dict):
+            return value
+    return {}
+
+
+def to_detail(state: Any) -> Detail:
+    """Read the listing store out of a decoded detail-page state tree."""
+    try:
+        listing = state["data"]["cachedListingData_nl"]
+    except (KeyError, TypeError) as exc:
+        raise PayloadError(f"unexpected detail state shape: {exc}") from exc
+
+    coordinates = listing.get("coordinates") or {}
+    insights = _local_insights(state)
+
+    features = tuple(
+        Feature(
+            group_id=group.get("Id") or "",
+            group_title=group.get("Title") or "",
+            position=position,
+            label=row.get("Label") or "",
+            value=row.get("Value") or "",
+        )
+        for group in listing.get("features") or ()
+        for position, row in enumerate(group.get("KenmerkenList") or ())
+    )
+
+    return Detail(
+        listing_id=listing.get("globalId"),
+        description=(listing.get("description") or {}).get("content") or "",
+        lat=coordinates.get("lat"),
+        lng=coordinates.get("lng"),
+        neighbourhood_price_m2=insights.get("averageAskingPricePerM2"),
+        neighbourhood_inhabitants=insights.get("inhabitants"),
+        features=features,
+    )
+
+
 def fetch_search_page(base_url: str, page: int = 1) -> SearchPage:
     """Fetch and decode one page of a funda search."""
     return to_search_page(extract_state(fetch_html(search_url(base_url, page))))
+
+
+def fetch_detail(url: str) -> Detail:
+    """Fetch and decode one listing's own page."""
+    return to_detail(extract_state(fetch_html(url)))
 
 
 def iter_all_listings(base_url: str, max_pages: int | None = None) -> Iterator[Listing]:
@@ -161,10 +212,12 @@ __all__ = [
     "FundaError",
     "PayloadError",
     "extract_state",
+    "fetch_detail",
     "fetch_html",
     "fetch_search_page",
     "iter_all_listings",
     "search_url",
+    "to_detail",
     "to_listing",
     "to_search_page",
 ]

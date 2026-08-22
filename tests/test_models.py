@@ -24,7 +24,7 @@ def make_listing(**overrides: object) -> Listing:
         "published": "2026-08-21",
         "agent": "Test Makelaars",
         "url": "https://www.funda.nl/detail/koop/den-haag/x/1/",
-        "photo_count": 10,
+        "photo_ids": tuple(f"tiara-media/x/{i}" for i in range(10)),
     }
     return Listing(**{**defaults, **overrides})  # type: ignore[arg-type]
 

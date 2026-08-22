@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}HouseMaster{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  {# Vendored, not a CDN: this is a local tool that must work offline. #}
+  <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="{{ url_for('browse.index') }}">House<span>master</span></a>
+    {% block masthead %}{% endblock %}
+  </header>
+  {% block content %}{% endblock %}
+</body>
+</html>

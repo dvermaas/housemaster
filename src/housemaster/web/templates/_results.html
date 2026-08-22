@@ -1,0 +1,28 @@
+{# Swapped whole by htmx; also included directly on first render. #}
+<main id="results">
+  <div class="results-head">
+    <span class="count"><b class="fig">{{ total }}</b> houses</span>
+    <label class="sort">
+      <span>Sort</span>
+      <select name="sort" aria-label="Sort order">
+        <option value="newest" {% if filters.sort == 'newest' %}selected{% endif %}>Newest on funda</option>
+        <option value="added" {% if filters.sort == 'added' %}selected{% endif %}>Recently cached</option>
+        <option value="price_asc" {% if filters.sort == 'price_asc' %}selected{% endif %}>Price, low to high</option>
+        <option value="price_desc" {% if filters.sort == 'price_desc' %}selected{% endif %}>Price, high to low</option>
+        <option value="ppm2_asc" {% if filters.sort == 'ppm2_asc' %}selected{% endif %}>€/m², low to high</option>
+        <option value="area_desc" {% if filters.sort == 'area_desc' %}selected{% endif %}>Largest first</option>
+      </select>
+    </label>
+  </div>
+
+  {% if listings %}
+    <div class="grid" id="grid">
+      {% include "_cards.html" %}
+    </div>
+  {% else %}
+    <div class="empty">
+      <h2>No houses match these filters.</h2>
+      <p>Widen the price range, or clear a filter to see more.</p>
+    </div>
+  {% endif %}
+</main>

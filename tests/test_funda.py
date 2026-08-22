@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from housemaster import funda
+from housemaster import funda, net
 from housemaster.funda import (
     BlockedError,
     PayloadError,
@@ -19,6 +19,7 @@ from housemaster.funda import (
     fetch_search_page,
     iter_all_listings,
     search_url,
+    to_detail,
     to_listing,
     to_search_page,
 )
@@ -45,7 +46,7 @@ def captured_get(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["kwargs"] = kwargs
         return FakeResponse(calls.get("body", ""))
 
-    monkeypatch.setattr(funda.requests, "get", fake_get)
+    monkeypatch.setattr(net.requests, "get", fake_get)
     return calls
 
 
@@ -134,7 +135,7 @@ def test_to_listing_maps_every_field(raw_listing: dict[str, Any]) -> None:
             "https://www.funda.nl/detail/koop/den-haag"
             "/appartement-camera-obscurastraat-253/44561281/"
         ),
-        photo_count=3,
+        photo_ids=("a", "b", "c"),
     )
 
 
@@ -171,6 +172,66 @@ def test_publish_timestamp_is_truncated_to_a_date(raw_listing: dict[str, Any]) -
 def test_house_number_may_carry_a_suffix(raw_listing: dict[str, Any]) -> None:
     raw_listing["address"]["house_number"] = "18 A"
     assert to_listing(raw_listing).address == "Camera Obscurastraat 18 A"
+
+
+def test_photo_ids_are_kept_not_just_counted(raw_listing: dict[str, Any]) -> None:
+    # The search page carries every photo id, so keeping them means photos need
+    # no detail request at all.
+    listing = to_listing(raw_listing)
+    assert listing.photo_ids == ("a", "b", "c")
+    assert listing.photo_count == 3
+
+
+def test_as_dict_reports_photo_count_not_the_id_list() -> None:
+    # 39 CDN paths would be noise in a CSV column.
+    data = to_listing({"photo_image_id": ["a", "b"]}).as_dict()
+    assert data["photo_count"] == 2
+    assert "photo_ids" not in data
+
+
+# --- to_detail -------------------------------------------------------------
+
+
+def test_to_detail_reads_the_listing_store(detail_state: dict[str, Any]) -> None:
+    detail = to_detail(detail_state)
+    assert detail.listing_id == 8116828
+    assert detail.description.startswith("Spoorwijk.")
+    assert (detail.lat, detail.lng) == (52.050217, 4.3105555)
+
+
+def test_to_detail_finds_local_insights_by_prefix(detail_state: dict[str, Any]) -> None:
+    # The key is `localInsights-den-haag/spoorwijk` -- it cannot be looked up
+    # directly without reimplementing funda's slug rules.
+    detail = to_detail(detail_state)
+    assert detail.neighbourhood_price_m2 == 3929
+    assert detail.neighbourhood_inhabitants == 3820
+
+
+def test_to_detail_flattens_kenmerken_groups(detail_state: dict[str, Any]) -> None:
+    detail = to_detail(detail_state)
+    assert len(detail.features) == 3
+    first = detail.features[0]
+    assert (first.group_id, first.group_title) == ("overdracht", "Overdracht")
+    assert (first.label, first.position) == ("Vraagprijs", 0)
+    # Position restarts within each group, so (group_id, position) is the key.
+    assert [(f.group_id, f.position) for f in detail.features] == [
+        ("overdracht", 0),
+        ("overdracht", 1),
+        ("bouw", 0),
+    ]
+
+
+def test_to_detail_tolerates_a_listing_with_no_insights_block() -> None:
+    detail = to_detail({"data": {"cachedListingData_nl": {"globalId": 1}}})
+    assert detail.neighbourhood_price_m2 is None
+    assert detail.features == ()
+    assert detail.description == ""
+
+
+@pytest.mark.parametrize("state", [{}, {"data": {}}, None])
+def test_to_detail_rejects_an_unexpected_shape(state: Any) -> None:
+    with pytest.raises(PayloadError):
+        to_detail(state)
 
 
 # --- to_search_page --------------------------------------------------------

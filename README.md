@@ -10,38 +10,69 @@ with no manual steps.
 
 ## Status
 
-Research phase complete; a first working extractor exists. Funda turns out to be
-far more tractable than expected — see [Findings](#findings-how-fundanl-works).
+Working end to end: scrape into a local cache, then browse and filter it.
 
 - [x] Map how funda.nl serves listing data
 - [x] Confirm which HTTP client gets past the bot wall
-- [x] Extract a full search page into structured records
-- [ ] Extract detail pages (features, description, neighbourhood insights)
-- [ ] Persist results + score against client criteria
+- [x] Extract search pages into structured records
+- [x] Extract detail pages (kenmerken, description, coordinates, buurt stats)
+- [x] SQLite cache with dedupe, price/status history and photo caching
+- [x] Web UI with filtering
+- [ ] Score against explicit client criteria
 - [ ] Export the client-facing overview
 
 ## Quick start
 
 ```bash
 uv sync
-uv run housemaster search                     # page 1 of the target search
-uv run housemaster search --page 2
-uv run housemaster search --url "<any funda search url>"
-uv run housemaster search --format json       # or csv
-uv run housemaster search --all --max-pages 3 # walk pages, capped
+uv run housemaster fetch            # scrape the target search into ./data
+uv run housemaster serve            # browse it at http://127.0.0.1:8765
 ```
 
-Text output per house: address, neighbourhood, price, price/m², living area,
-rooms, bedrooms, energy label, agent, publication date, photo count and detail
-URL, followed by price/area summary statistics. `--format json` and
-`--format csv` emit the same records for downstream processing.
+The first `fetch` takes roughly 15 minutes (35 search pages, ~520 detail pages,
+~2 600 photos, a few hundred MB). Every run after that takes about 30 seconds,
+because detail pages and photos are fetched **once per house, ever**. To try it
+without the wait:
+
+```bash
+uv run housemaster fetch --max-pages 2 --max-details 5 --photos-per-house 2
+```
+
+### Commands
+
+```bash
+housemaster fetch [--url URL] [--db PATH] [--max-pages N] [--max-details N]
+                  [--photos-per-house 5] [--photo-width 720]
+                  [--no-detail] [--no-photos] [--pace 0.4] [--quiet]
+housemaster serve [--db PATH] [--host 127.0.0.1] [--port 8765] [--debug]
+housemaster status [--db PATH]      # what the cache holds, and the last run
+housemaster search [...]            # live, no database -- the original probe
+```
+
+`search` is unchanged and still hits funda directly, printing text, JSON or CSV.
+It is the quick way to check the extraction path without touching the cache.
+
+Data lives in `./data/` (`housemaster.db` plus `media/`), overridable with
+`--db` or `$HOUSEMASTER_DB`; the media store always sits beside the database.
+
+### What `fetch` does
+
+1. Walks the search pages, upserting every house it sees. **Price and status are
+   refreshed on every run**, and any change appends a row to `price_history` —
+   so price drops and "under offer" transitions become visible.
+2. Fetches a detail page **only for houses it has never enriched**, adding the
+   description, all nine kenmerken groups, coordinates and neighbourhood stats.
+3. Downloads the first N photos of each house that lacks them.
+
+Steps 2 and 3 are driven by what the *database* lacks, not by what the run
+happened to see, so an interrupted fetch is resumed by simply running it again.
+There is no checkpoint state and no `--resume` flag.
 
 ## Development
 
 ```bash
-uv run pytest                                 # offline; the network test is skipped
-uv run ruff check .                           # lint
-uv run ruff format .                          # format
+uv run pytest                                 # 209 tests, offline
+uv run ruff check . && uv run ruff format .   # lint + format
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # canary against the live site
 ```
 
@@ -158,6 +189,31 @@ Since one request yields 15 fully-detailed listings, the whole Den Haag overview
 is ~35 polite requests. Keep the pacing modest, and cache fetched HTML while
 iterating on extractors.
 
+## The photo CDN
+
+Photos need no detail request: the `photo_image_id` already in every search
+result is a complete CDN path.
+
+```
+https://cloud.funda.nl/{photo_image_id}?options=width={W}
+```
+
+Widths round **up** to a fixed ladder — 228, 464, 720, 1080, 1440, and the
+2160px master when `?options` is omitted. At width 720 a photo is 30–60 KB.
+
+Three traps, each of which silently produces garbage rather than an error:
+
+1. `Vary: accept` — curl_cffi's Chrome impersonation sends Chrome's own Accept
+   header, so without an override you get **AVIF bytes in a `.jpg` file**.
+   `media.py` asks for JPEG explicitly and then checks the magic bytes.
+2. **TLS impersonation is required for the CDN too** — plain requests get 403.
+3. A 404 comes back as `text/plain`, so the status code alone proves nothing.
+
+Funda also genuinely serves some images as **PNG**, so the downloader keys the
+file extension off the real magic bytes rather than assuming JPEG. URLs are
+content-addressed and immutable (conditional requests never return 304), so a
+cached photo is never revalidated — only skipped.
+
 ## Project layout
 
 Standard src layout, built with hatchling, installed by `uv sync` as an editable
@@ -166,16 +222,38 @@ package exposing the `housemaster` console script.
 ```
 src/housemaster/
   devalue.py     decoder for Nuxt's __NUXT_DATA__ flat-array format
-  models.py      Listing / SearchPage records
-  funda.py       fetching (with bot-wall detection) + field extraction
+  models.py      Listing / Detail / Feature / SearchPage records
+  net.py         the one place an HTTP request is made (TLS impersonation)
+  funda.py       search + detail extraction, with bot-wall detection
+  db.py          SQLite cache: schema, migrations, upserts, queries
+  media.py       photo URLs, download, validation, atomic writes
+  pipeline.py    the fetch orchestration -- the only network+database module
   render.py      text / json / csv output
   cli.py         argparse entry point -> `housemaster`
+  web/           Flask app: views, Jinja filters, templates, vendored htmx
 tests/           offline unit tests + one opt-in network canary
 ```
 
-The layering is deliberate: `devalue` knows nothing about funda, `funda` knows
-nothing about output formats, and `render` never touches the network — so each
-is testable on its own.
+The layering is deliberate and worth preserving: `devalue` knows nothing about
+funda, `funda` knows nothing about storage, `db` knows nothing about HTTP,
+`render` and `web` never fetch, and only `cli.py` prints. `pipeline.py` is the
+single module allowed to touch both the network and the database.
+
+## The web UI
+
+Flask + Jinja + htmx. No build step, no bundler, no JavaScript framework; htmx
+and both webfonts are vendored into `web/static/`, so the app works offline.
+
+The filter rail GETs back to `/`, which returns the results fragment when htmx
+asks for it and the full page otherwise. That keeps the pushed URL shareable —
+reloading or bookmarking a filtered view renders properly instead of showing a
+bare fragment. Without JavaScript the same form still works as a plain GET.
+
+Design direction is "Plattegrond": architectural drafting, hairline rules, and
+every figure set in a monospace face with tabular numerals so prices and €/m²
+align into columns you can scan straight down a grid of 500 houses. Energy
+labels use the real Dutch NEN colour scale, and each card carries a small scale
+bar under its area figure showing that house's size within the search's range.
 
 ## Tooling
 

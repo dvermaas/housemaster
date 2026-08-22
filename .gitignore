@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 
+# The cache: SQLite (three files under WAL) plus the media store
+data/
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
