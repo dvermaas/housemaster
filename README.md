@@ -259,13 +259,31 @@ bar under its area figure showing that house's size within the search's range.
 
 Managed with [uv](https://docs.astral.sh/uv/); Python 3.14.
 
+The runtime surface is deliberately two packages. An AST scan of every import in
+`src/` and `tests/` confirms nothing else is reached:
+
 | Dependency | Role |
 | --- | --- |
-| `curl_cffi` | HTTP with browser TLS impersonation — the whole pipeline runs on this |
-| `cloakbrowser` | stealth Chromium; fallback and investigation only |
-| `trafilatura` | text extraction — currently unused, funda ships clean prose |
+| `curl_cffi` | TLS-impersonating HTTP — **one import, in `net.py`**, and the whole pipeline runs through it |
+| `flask` | the `serve` web app (Jinja comes with it; htmx and fonts are vendored) |
 | `pytest` (dev) | test runner; strict markers/config, offline by default |
 | `ruff` (dev) | lint + format; rules configured in `pyproject.toml` |
+
+**`cloakbrowser` is an optional extra**, not a default dependency:
+
+```bash
+uv sync --extra browser     # only when you need the Python stealth-browser fallback
+```
+
+No shipped code imports it, and it costs ~110 MB (playwright) plus a ~200 MB
+Chromium binary. It stays declared because it is the deliberate escape hatch for
+when Akamai tightens or the payload shape changes. The browser MCP below is
+unaffected either way — it depends on a *separate npm package* of the same name
+and manages its own Chromium in `~/.cloakbrowser/`.
+
+**`trafilatura` was removed.** Funda ships clean prose in `description.content`,
+so there was nothing to boilerplate-strip; it was 47 MB (31 MB of it `babel`)
+for zero imports. Dropping both took the venv from ~205 MB to 48 MB.
 
 ### Browser automation via MCP
 

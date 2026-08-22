@@ -38,12 +38,17 @@ uv run ruff check . && uv run ruff format .
 
 The suite is **offline by default**: `tests/conftest.py` skips anything marked `network` unless `HOUSEMASTER_NETWORK_TESTS=1` is set. Run `HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network` to exercise the live-site canary — that test is the early warning for funda changing its payload shape or Akamai tightening.
 
-CloakBrowser's stealth Chromium is managed separately from pip packages:
+`cloakbrowser` is an **optional extra**, not installed by a plain `uv sync`. Only
+add it when you actually need the Python stealth-browser fallback:
 
 ```bash
-uv run cloakbrowser info     # diagnostics: binary path, version, license, module status
-uv run cloakbrowser install  # download the Chromium binary (already installed on this machine)
+uv sync --extra browser      # installs cloakbrowser (~110 MB via playwright)
+uv run cloakbrowser info     # then: binary path, version, licence, module status
+uv run cloakbrowser install  # download the Chromium binary (already on this machine)
 ```
+
+The `mcp__cloakbrowser__*` browser tools do **not** need this — they run off a
+separate npm package and their Chromium lives in `~/.cloakbrowser/`.
 
 ## Architecture
 
@@ -116,9 +121,11 @@ Flask + Jinja + htmx, no build step. htmx and both woff2 fonts are vendored into
 
 ## Fetching strategy
 
-1. **`curl_cffi`** — the whole pipeline. ~0.3 s/page.
-2. **`cloakbrowser`** — fallback and investigation only, for when Akamai tightens or the payload shape changes. Drop-in Playwright API: `from cloakbrowser import launch` (plus `launch_async`, `launch_context`, `launch_persistent_context`, `*_async`). Useful kwargs: `proxy`, `humanize=True` + `human_preset`, `geoip=True`, `locale`/`timezone`, `stealth_args` (on by default — leave it on).
-3. **`trafilatura`** — unused. Funda ships clean prose in `description.content`, so there is nothing to boilerplate-strip. It could be dropped.
+The runtime dependency surface is exactly **`curl_cffi` + `flask`** — verified by an AST scan of every import in `src/` and `tests/`. Keep it that way; a new runtime dependency should have to justify itself.
+
+1. **`curl_cffi`** — the whole pipeline, through the single call site in `net.py`. ~0.3 s/page.
+2. **`cloakbrowser`** — an *optional extra* (`uv sync --extra browser`), for when Akamai tightens or the payload shape changes. Nothing imports it today. Drop-in Playwright API: `from cloakbrowser import launch` (plus `launch_async`, `launch_context`, `launch_persistent_context`, `*_async`). Useful kwargs: `proxy`, `humanize=True` + `human_preset`, `geoip=True`, `locale`/`timezone`, `stealth_args` (on by default — leave it on).
+3. **`trafilatura`** — removed. Funda ships clean prose in `description.content`, so there was nothing to boilerplate-strip.
 
 ## Browser MCP (`mcp__cloakbrowser__*`)
 

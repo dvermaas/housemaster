@@ -13,6 +13,7 @@ from typing import Any
 
 from flask import (
     Blueprint,
+    Response,
     abort,
     current_app,
     render_template,
@@ -20,7 +21,6 @@ from flask import (
     send_from_directory,
     url_for,
 )
-from werkzeug.wrappers import Response
 
 from housemaster import db
 from housemaster.web.filters import ENERGY_SCALE, status_label
