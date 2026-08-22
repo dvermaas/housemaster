@@ -119,6 +119,18 @@ Flask + Jinja + htmx, no build step. htmx and both woff2 fonts are vendored into
 - The connection is per-request via `flask.g`, opened read-only. WAL lets `serve` read while `fetch` writes.
 - Design direction is "Plattegrond" (architectural drafting; mono tabular figures; the real Dutch NEN energy colours). Tokens live at the top of `web/static/app.css`.
 
+### The map view (`?view=map`)
+
+Swaps the card grid for a MapLibre map of the same filtered set; the rail is shared. Basemap is [OpenFreeMap](https://openfreemap.org/) — no key, no account, no limits, attribution added by MapLibre itself. Markers come from `/houses.geojson` (same filters); clicking one fetches `/house/<id>/card`, so the popup markup is Jinja like every other card rather than HTML assembled in JS.
+
+Three things that will break if disturbed:
+
+- **The map instance is created once.** `#map` carries `hx-preserve` so a filter change only calls `source.setData(newUrl)` — rebuilding it on every swap would throw away the viewport the user panned to. Switching to the grid *does* remove the node (hx-preserve needs it in both old and new markup), so `sync()` calls `dropIfDetached()` to tear down the dead instance and free its WebGL context before making a new one.
+- **`<input type="hidden" name="view">` lives inside `#results`, not the rail.** The filter form serialises its whole subtree and `#results` is reserialised on every swap; move it to the rail and it goes stale, and filtering on the map drops you back to the grid.
+- **Bounds come from `db.map_bounds`, not from the GeoJSON.** Fitting the view by downloading the feature collection a second time both wasted a request and raced the source load.
+
+`MAX_MAP_POINTS` caps the GeoJSON so a pathological filter cannot ship an unbounded payload. The map is the only part of the app that needs the network — OSM's tile policy forbids pre-downloading tiles, so they cannot be vendored like htmx and the fonts.
+
 ## Fetching strategy
 
 The runtime dependency surface is exactly **`curl_cffi` + `flask`** — verified by an AST scan of every import in `src/` and `tests/`. Keep it that way; a new runtime dependency should have to justify itself.

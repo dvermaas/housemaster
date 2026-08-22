@@ -16,6 +16,7 @@ from flask import (
     Response,
     abort,
     current_app,
+    jsonify,
     render_template,
     request,
     send_from_directory,
@@ -30,6 +31,9 @@ bp = Blueprint("browse", __name__)
 PER_PAGE = 24
 GALLERY_PREVIEW = 5
 """Photos shown before the rest fold away behind a disclosure."""
+
+VIEWS = ("grid", "map")
+"""Two ways to look at the same filtered set. The filter rail is shared."""
 
 
 def _conn() -> sqlite3.Connection:
@@ -64,6 +68,11 @@ def filters_from_args() -> db.Filters:
     )
 
 
+def current_view() -> str:
+    requested = (request.args.get("view") or "").strip()
+    return requested if requested in VIEWS else "grid"
+
+
 def _is_partial() -> bool:
     """htmx swaps get the fragment -- but a history restore needs a full page,
     or the back button lands on a bare fragment."""
@@ -85,10 +94,31 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
     # Built here rather than in the template: carrying the current filters over
     # to the next page is URL work, not markup.
     next_args = request.args.to_dict(flat=False) | {"page": [str(page + 1)]}
+    view = current_view()
+
+    # The map reads its own data from this URL rather than from the swapped
+    # markup, so the map instance survives a filter change with its viewport
+    # intact instead of being torn down and rebuilt.
+    geojson_args = {
+        k: v
+        for k, v in request.args.to_dict(flat=False).items()
+        if k not in {"page", "view"}
+    }
 
     return {
         "listings": listings,
         "more_url": url_for("browse.more", **next_args),
+        "view": view,
+        "bounds": db.map_bounds(conn, filters) if view == "map" else None,
+        "geojson_url": url_for("browse.houses_geojson", **geojson_args),
+        "other_view": "grid" if view == "map" else "map",
+        "view_url": url_for(
+            "browse.index",
+            **(
+                request.args.to_dict(flat=False)
+                | {"view": ["grid" if view == "map" else "map"], "page": ["1"]}
+            ),
+        ),
         "total": total,
         "page": page,
         "has_more": page * PER_PAGE < total,
@@ -117,6 +147,52 @@ def index() -> str:
         last_run=db.latest_run(conn),
         **context,
     )
+
+
+@bp.route("/houses.geojson")
+def houses_geojson() -> Response:
+    """The filtered set as GeoJSON, for the map layer to render.
+
+    Carries only what drawing a marker needs -- the popup fetches its own card,
+    so this stays small even at a few thousand houses.
+    """
+    rows = db.query_map_points(_conn(), filters_from_args())
+    return jsonify(
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": row["listing_id"],
+                    "geometry": {
+                        "type": "Point",
+                        # GeoJSON is lng,lat -- the opposite order to how the
+                        # rest of this codebase says it.
+                        "coordinates": [row["lng"], row["lat"]],
+                    },
+                    "properties": {
+                        "id": row["listing_id"],
+                        "label": row["energy_label"] or "?",
+                        "price": row["price"],
+                    },
+                }
+                for row in rows
+            ],
+        }
+    )
+
+
+@bp.route("/house/<int:listing_id>/card")
+def house_card(listing_id: int) -> str:
+    """The popup shown when a map marker is clicked.
+
+    Rendered by Jinja rather than assembled in JavaScript, so the card shares
+    exactly one definition of how a house is presented.
+    """
+    listing = db.get_listing(_conn(), listing_id)
+    if listing is None:
+        abort(404)
+    return render_template("_popup.html", house=listing, status_label=status_label)
 
 
 @bp.route("/more")

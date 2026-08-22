@@ -1,7 +1,22 @@
 {# Swapped whole by htmx; also included directly on first render. #}
-<main id="results">
+<main id="results" data-view="{{ view }}" data-geojson="{{ geojson_url }}"
+      {% if bounds %}data-bounds="{{ bounds | join(",") }}"{% endif %}>
+  {# Inside #results, not the rail, so it is reserialised on every swap: the
+     filter form must carry the current view or changing a filter while on the
+     map silently drops you back to the grid. #}
+  <input type="hidden" name="view" value="{{ view }}">
+
   <div class="results-head">
     <span class="count"><b class="fig">{{ total }}</b> houses</span>
+
+    {# A link, not a form control: the view is a property of the page, and this
+       way it works with JavaScript off and can be opened in a new tab. #}
+    <a class="viewswitch" href="{{ view_url }}"
+       hx-get="{{ view_url }}" hx-target="#results" hx-select="#results"
+       hx-swap="outerHTML" hx-push-url="true">
+      {% if view == 'map' %}▤ Grid{% else %}◈ Map{% endif %}
+    </a>
+
     <label class="sort">
       <span>Sort</span>
       <select name="sort" aria-label="Sort order">
@@ -15,7 +30,9 @@
     </label>
   </div>
 
-  {% if listings %}
+  {% if view == 'map' %}
+    {% include "_map.html" %}
+  {% elif listings %}
     <div class="grid" id="grid">
       {% include "_cards.html" %}
     </div>

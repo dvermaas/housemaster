@@ -535,3 +535,123 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ------------------------------------------------------------------- map */
+
+.viewswitch {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 5px 11px;
+  border: 1px solid var(--rule-strong);
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+}
+.viewswitch:hover { border-color: var(--blueprint); color: var(--blueprint); }
+
+.mapwrap { position: relative; }
+
+#map {
+  height: calc(100vh - 190px);
+  min-height: 420px;
+  border: 1px solid var(--rule);
+  background: var(--paper-sunk);
+}
+
+/* Registration ticks, as on the cards -- the map is another drawing sheet. */
+.mapwrap::before,
+.mapwrap::after {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--rule-strong);
+  pointer-events: none;
+  z-index: 2;
+}
+.mapwrap::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+.mapwrap::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+.maplegend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  border: 1px solid var(--rule);
+}
+.maplegend-title {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-right: 4px;
+}
+
+/* MapLibre's own chrome, brought into the drafting palette. */
+.maplibregl-ctrl-group {
+  border: 1px solid var(--rule-strong) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.maplibregl-ctrl-group button { border-radius: 0 !important; }
+.maplibregl-ctrl-scale {
+  font-family: var(--mono) !important;
+  font-size: 10px !important;
+  border-color: var(--rule-strong) !important;
+  background: color-mix(in srgb, var(--card) 88%, transparent) !important;
+}
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  background: color-mix(in srgb, var(--card) 88%, transparent) !important;
+}
+
+/* ------------------------------------------------------------- map popup */
+
+.housepop .maplibregl-popup-content {
+  padding: 0;
+  border-radius: 0;
+  border: 1px solid var(--rule-strong);
+  box-shadow: 0 2px 10px rgb(22 24 28 / 0.13);
+  background: var(--card);
+  overflow: hidden;
+}
+.housepop .maplibregl-popup-tip { border-top-color: var(--rule-strong) !important; }
+.housepop .maplibregl-popup-close-button {
+  font-size: 17px;
+  color: var(--ink-soft);
+  padding: 2px 7px;
+}
+.housepop .maplibregl-popup-close-button:hover {
+  background: transparent;
+  color: var(--ink);
+}
+
+.popcard img {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  display: block;
+  border-bottom: 1px solid var(--rule);
+}
+.popcard-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 7px; }
+.popcard-body .address { font-weight: 700; font-size: 14px; line-height: 1.25; }
+.popcard-body .specs { border-top: 1px solid var(--rule); padding-top: 7px; }
+.popcard-body .price { font-size: 15px; }
+.popcard-loading {
+  padding: 18px 20px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+@media (max-width: 900px) {
+  #map { height: 62vh; }
+}

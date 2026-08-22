@@ -616,6 +616,46 @@ def query_listings(
     ).fetchall()
 
 
+MAX_MAP_POINTS = 5000
+"""A ceiling so a pathological filter cannot ship an unbounded payload."""
+
+
+def query_map_points(
+    conn: sqlite3.Connection, filters: Filters, *, limit: int = MAX_MAP_POINTS
+) -> list[sqlite3.Row]:
+    """Every matching house that has coordinates -- not a page of them.
+
+    The map plots the whole filtered set at once, so this deliberately ignores
+    the pagination `query_listings` applies. Only the fields the map needs to
+    *render* are selected; the popup fetches its own card.
+    """
+    where, params = _where(filters)
+    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
+    return conn.execute(
+        f"SELECT listing_id, lat, lng, energy_label, price, price_per_m2 "  # noqa: S608
+        f"FROM listings{clause} ORDER BY listing_id LIMIT ?",
+        [*params, limit],
+    ).fetchall()
+
+
+def map_bounds(conn: sqlite3.Connection, filters: Filters) -> tuple[float, ...] | None:
+    """Bounding box of the filtered set, as (min_lng, min_lat, max_lng, max_lat).
+
+    Computed here so the map can fit its view from one number quartet instead of
+    downloading the whole GeoJSON a second time just to measure it.
+    """
+    where, params = _where(filters)
+    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
+    row = conn.execute(
+        f"SELECT MIN(lng) x1, MIN(lat) y1, MAX(lng) x2, MAX(lat) y2 "  # noqa: S608
+        f"FROM listings{clause}",
+        params,
+    ).fetchone()
+    if row is None or row["x1"] is None:
+        return None
+    return (row["x1"], row["y1"], row["x2"], row["y2"])
+
+
 def count_listings(conn: sqlite3.Connection, filters: Filters) -> int:
     where, params = _where(filters)
     row = conn.execute(f"SELECT COUNT(*) FROM listings{where}", params).fetchone()  # noqa: S608

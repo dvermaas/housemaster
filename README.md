@@ -18,6 +18,7 @@ Working end to end: scrape into a local cache, then browse and filter it.
 - [x] Extract detail pages (kenmerken, description, coordinates, buurt stats)
 - [x] SQLite cache with dedupe, price/status history and photo caching
 - [x] Web UI with filtering
+- [x] Map view, filtered live
 - [ ] Score against explicit client criteria
 - [ ] Export the client-facing overview
 
@@ -71,7 +72,7 @@ There is no checkpoint state and no `--resume` flag.
 ## Development
 
 ```bash
-uv run pytest                                 # 209 tests, offline
+uv run pytest                                 # 220 tests, offline
 uv run ruff check . && uv run ruff format .   # lint + format
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # canary against the live site
 ```
@@ -162,12 +163,38 @@ id (44561281), and a third id in `friendlyUrlSlug` (17298554).
 
 These are mostly redundant with the SSR payload, so the pipeline skips them.
 
-There is also an **unauthenticated Elasticsearch** endpoint at
-`listing-search-wonen.funda.nl/geo-wonen-alias-prod/_search/template`, called
-with `{"id":"geo-neighborhoods_20260227","params":{"city":"den-haag"}}`. The
-browser only uses it for neighbourhood lookups — listing search happens
-server-side — but it is a stored-template endpoint, so other template ids likely
-query listings directly. Worth probing if more than 15/page is ever needed.
+### How funda's own map works
+
+Worth knowing, because it validates this project's architecture. Funda's map
+view (`/zoeken/kaart/koop`) runs **Google Maps JS API v3.66.1a**, but Google
+supplies *only the basemap tiles* — every pin is funda's own data, fetched from
+funda's backend and painted by funda's code on a canvas overlay (2 canvases,
+zero DOM markers). Google never sees a listing.
+
+The pin data comes from an **Elasticsearch** call made straight from the
+browser:
+
+```
+POST https://listing-search-wonen.funda.nl/_msearch/template
+{"index": "listings-wonen-searcher-alias-prod"}
+{"id": "map_result_20260227", "params": {
+   ...the same ~45 filters as the list search...,
+   "map_result": {"top_left_lat": …, "bottom_right_lng": …,
+                  "precision": 15, "number_of_globalids": 13,
+                  "include_listing_details": false}}}
+```
+
+Elasticsearch does the clustering server-side with a `geotile_grid`
+aggregation, returning ~500 buckets keyed `"15/16809/10822"` (zoom/x/y), each
+with a `doc_count`, a centroid, and up to 13 listing ids. With 89,630 listings
+matching nationally, they never ship individual pins — the orange bubbles *are*
+the bucket counts.
+
+**These XHR endpoints are gated more tightly than the HTML pages.** `curl_cffi`
+gets `403 Access Denied` even with byte-identical headers: they need Akamai Bot
+Manager cookies (`bm_sv`, `_abck`) that a browser earns by executing Akamai's
+sensor JS, which TLS impersonation alone cannot supply. Not a problem here — we
+already hold every listing locally, with coordinates.
 
 ## What this means for the design
 
@@ -230,7 +257,7 @@ src/housemaster/
   pipeline.py    the fetch orchestration -- the only network+database module
   render.py      text / json / csv output
   cli.py         argparse entry point -> `housemaster`
-  web/           Flask app: views, Jinja filters, templates, vendored htmx
+  web/           Flask app: views, filters, templates, map.js, vendored assets
 tests/           offline unit tests + one opt-in network canary
 ```
 
@@ -248,6 +275,34 @@ The filter rail GETs back to `/`, which returns the results fragment when htmx
 asks for it and the full page otherwise. That keeps the pushed URL shareable —
 reloading or bookmarking a filtered view renders properly instead of showing a
 bare fragment. Without JavaScript the same form still works as a plain GET.
+
+### The map
+
+The **Map** toggle beside the sort control swaps the card grid for a map of the
+same filtered set — the filter rail stays put, so narrowing the price range
+makes markers disappear in place. Markers are coloured by the NEN energy scale;
+clicking one opens a card with the cached photo, address, price and €/m².
+
+Basemap tiles come from [OpenFreeMap](https://openfreemap.org/) — **no API key,
+no account, no usage limits**, attribution rendered automatically. Google and
+Apple were both ruled out: Apple's MapKit JS needs a $99/year developer
+membership, Google's free Embed API can only show a *single* place, and its
+JavaScript API demands a billing account with a card on file.
+
+Two implementation details that are load-bearing:
+
+- The MapLibre instance is created **once** and kept alive. The map node carries
+  `hx-preserve`, and a filter change only pushes a new GeoJSON URL into the
+  existing source — so the viewport you panned to survives. Switching to the
+  grid genuinely removes the node, so `map.js` detects the detached container
+  and rebuilds (also freeing the WebGL context).
+- The view is a hidden field **inside** `#results`, not in the rail. The filter
+  form serialises everything it contains, and it is reserialised on every swap;
+  without it, changing a filter on the map silently drops you back to the grid.
+
+The map is the **one part of the app that needs a network connection** — the
+OSM tile policy forbids pre-downloading tiles, so they cannot be vendored the
+way htmx and the fonts are.
 
 Design direction is "Plattegrond": architectural drafting, hairline rules, and
 every figure set in a monospace face with tabular numerals so prices and €/m²

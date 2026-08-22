@@ -214,6 +214,88 @@ def test_the_sentinel_overrides_every_inherited_htmx_attribute(
     assert 'hx-swap="outerHTML"' in sentinel
 
 
+# --- the map view ----------------------------------------------------------
+
+
+def test_the_map_view_replaces_the_grid_but_keeps_the_rail(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    assert 'id="map"' in page
+    assert 'class="rail"' in page  # filters stay
+    assert 'class="grid"' not in page  # cards do not
+
+
+def test_the_map_node_is_preserved_across_swaps(client: FlaskClient) -> None:
+    # Without hx-preserve the MapLibre instance is rebuilt on every filter
+    # change and the viewport the user panned to is lost.
+    assert "hx-preserve" in body(client.get("/?view=map"))
+
+
+def test_the_view_travels_with_the_filter_form(client: FlaskClient) -> None:
+    # The form serialises everything inside it; without this hidden field,
+    # changing a filter on the map drops you back to the grid.
+    page = body(client.get("/?view=map"))
+    assert '<input type="hidden" name="view" value="map">' in page
+
+
+def test_filtering_on_the_map_stays_on_the_map(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map&price_max=280000", headers=HX))
+    assert 'data-view="map"' in page
+    assert 'id="map"' in page
+
+
+def test_the_map_carries_its_data_url_and_bounds(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    assert "houses.geojson" in page
+    assert "data-bounds=" in page
+
+
+def test_geojson_is_valid_and_filtered(client: FlaskClient) -> None:
+    everything = client.get("/houses.geojson").get_json()
+    assert everything["type"] == "FeatureCollection"
+    assert len(everything["features"]) == 1  # only house 1 has coordinates
+
+    feature = everything["features"][0]
+    assert feature["geometry"]["type"] == "Point"
+    # GeoJSON is lng,lat -- the reverse of how the rest of the code says it.
+    assert feature["geometry"]["coordinates"] == [4.31, 52.05]
+    assert feature["properties"]["id"] == 1
+
+    none = client.get("/houses.geojson?price_min=9000000").get_json()
+    assert none["features"] == []
+
+
+def test_houses_without_coordinates_are_omitted(client: FlaskClient) -> None:
+    # Houses 2 and 3 were never enriched, so they have no lat/lng.
+    payload = client.get("/houses.geojson").get_json()
+    ids = {f["properties"]["id"] for f in payload["features"]}
+    assert ids == {1}
+
+
+def test_bounds_are_none_when_nothing_matches(cache: Path) -> None:
+    conn = db.connect(cache, read_only=True)
+    try:
+        assert db.map_bounds(conn, db.Filters(price_min=9_000_000)) is None
+    finally:
+        conn.close()
+
+
+def test_the_popup_card_renders_a_house(client: FlaskClient) -> None:
+    page = body(client.get("/house/1/card"))
+    assert "<!doctype" not in page.lower()  # a fragment, not a page
+    assert "Aaastraat 1" in page
+    assert "€ 260.000" in page
+    assert "/media/1/00.jpg" in page  # uses the cached photo
+
+
+def test_an_unknown_popup_card_is_a_404(client: FlaskClient) -> None:
+    assert client.get("/house/999999/card").status_code == 404
+
+
+def test_an_unknown_view_falls_back_to_the_grid(client: FlaskClient) -> None:
+    page = body(client.get("/?view=../../etc/passwd"))
+    assert 'data-view="grid"' in page
+
+
 # --- the detail page -------------------------------------------------------
 
 

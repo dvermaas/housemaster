@@ -1,0 +1,25 @@
+{#
+  The map canvas. `hx-preserve` keeps this exact node across htmx swaps, so
+  changing a filter updates the markers without tearing down the MapLibre
+  instance -- the viewport you panned to stays where you left it.
+
+  The data itself is not in this markup: map.js reads the geojson URL off
+  #results after every swap and hands it to the live source.
+#}
+<div class="mapwrap">
+  <div id="map" hx-preserve="true" aria-label="Map of matching houses"></div>
+
+  <div class="maplegend">
+    <span class="maplegend-title">Energy</span>
+    {% for label in ["A", "B", "C", "D", "E", "F", "G"] %}
+      <span class="chip" style="--swatch: var(--e-{{ label | energy_class }})">{{ label }}</span>
+    {% endfor %}
+  </div>
+
+  <noscript>
+    <div class="empty" style="margin-top:12px">
+      <h2>The map needs JavaScript.</h2>
+      <p>Switch back to the grid to browse these houses without it.</p>
+    </div>
+  </noscript>
+</div>

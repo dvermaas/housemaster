@@ -1,0 +1,43 @@
+{# The card shown when a map marker is clicked. Same vocabulary as a grid card,
+   sized for a popup. #}
+<article class="popcard">
+  <a href="{{ url_for('browse.house', listing_id=house.listing_id) }}">
+    {% if house.thumb %}
+      <img src="{{ url_for('browse.media_file', filename=house.thumb) }}"
+           alt="{{ house.address }}" loading="lazy">
+    {% elif house.first_image %}
+      <img src="{{ photo_url(house.first_image, 464) }}"
+           alt="{{ house.address }}" loading="lazy">
+    {% endif %}
+  </a>
+
+  <div class="popcard-body">
+    <a href="{{ url_for('browse.house', listing_id=house.listing_id) }}">
+      <div class="address">{{ house.address }}</div>
+    </a>
+    <div class="where">{{ house.neighbourhood or house.city }}</div>
+
+    <div class="price-row">
+      <span class="price">{{ house.price | euro }}</span>
+      {% if house.price_was %}
+        <span class="price-was">{{ house.price_was | euro }}</span>
+      {% endif %}
+      <span class="ppm2">{{ house.price_per_m2 | euro }}/m²</span>
+    </div>
+
+    <div class="specs">
+      <span>{{ house.living_area or '—' }} m²</span>
+      <span class="sep">·</span>
+      <span>{{ house.rooms or '—' }} rooms</span>
+      <span class="sep">·</span>
+      <span>{{ house.bedrooms or '—' }} bed</span>
+      <span class="chip" style="--swatch: var(--e-{{ house.energy_label | energy_class }})">
+        {{ house.energy_label or '?' }}
+      </span>
+    </div>
+
+    {% if house.status and house.status != 'none' %}
+      <span class="badge offer">{{ status_label(house.status) }}</span>
+    {% endif %}
+  </div>
+</article>
