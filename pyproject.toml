@@ -1,0 +1,87 @@
+[project]
+name = "housemaster"
+version = "0.1.0"
+description = "Automated house-listing overviews from funda.nl"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cloakbrowser>=0.5.8",
+    "curl-cffi>=0.16.1",
+    "trafilatura>=2.2.0",
+]
+
+[project.scripts]
+housemaster = "housemaster.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/housemaster"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",   # a typo'd @pytest.mark is an error, not a silent no-op
+    "--strict-config",
+    "-ra",                # summarise every non-passing outcome
+    "--import-mode=importlib",
+]
+markers = [
+    "network: hits funda.nl for real (deselect with '-m \"not network\"')",
+]
+xfail_strict = true       # an xfail that passes is a failure worth knowing about
+
+[tool.ruff]
+line-length = 90
+src = ["src", "tests"]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "F",      # pyflakes: real errors -- undefined names, unused imports
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "I",      # import sorting
+    "N",      # pep8 naming
+    "UP",     # pyupgrade: keep syntax current for the pinned Python
+    "B",      # bugbear: likely bugs (mutable defaults, loop-variable capture)
+    "A",      # no shadowing builtins
+    "C4",     # comprehension clarity
+    "SIM",    # simplifiable constructs
+    "RET",    # return-flow consistency
+    "PTH",    # prefer pathlib over os.path
+    "PL",     # pylint subset: too-many-args, magic comparisons
+    "TRY",    # exception antipatterns
+    "RUF",    # ruff's own checks
+    "ARG",    # unused arguments
+    "DTZ",    # naive datetimes
+    "T20",    # no stray print() outside the CLI
+    "S",      # bandit: security antipatterns
+]
+ignore = [
+    "TRY003",   # long messages inline: the alternative is an exception class per message
+    "PLR0911",  # a dispatch function with several returns is clearer than nesting
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/housemaster/cli.py" = ["T20"]      # the CLI is where printing belongs
+"src/housemaster/render.py" = ["E501"]  # f-string tables read worse when wrapped
+"tests/*" = [
+    "S101",     # assert is the point of a test
+    "PLR2004",  # literal comparisons are the assertions
+    "ARG001",   # fixtures are often requested for their side effects
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["housemaster"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
