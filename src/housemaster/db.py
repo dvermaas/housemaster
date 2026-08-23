@@ -18,9 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from housemaster.models import Detail, Listing
+from housemaster.models import Boundary, Detail, Listing
 
 DEFAULT_DB_PATH = Path("data/housemaster.db")
+MAX_BOUNDARY_ATTEMPTS = 2
 
 
 def utcnow() -> str:
@@ -162,9 +163,35 @@ def _migration_002_drop_photo_storage(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_003_boundaries(conn: sqlite3.Connection) -> None:
+    """Neighbourhood outlines, for the map's choropleth overlay.
+
+    Keyed on the buurt *name* because that is what a listing carries -- funda
+    never gives us an identifier, so the slug is derived and is therefore a
+    property of the row rather than its key.
+
+    `geometry` stays NULL for a buurt whose slug did not resolve; `attempts`
+    stops us asking again forever. Boundaries do not move, so a fetched row is
+    never refreshed.
+    """
+    conn.executescript("""
+        CREATE TABLE boundaries (
+            name       TEXT PRIMARY KEY,   -- matches listings.neighbourhood
+            slug       TEXT NOT NULL,
+            geometry   TEXT,               -- GeoJSON geometry; NULL until fetched
+            fetched_at TEXT,
+            attempts   INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        ) STRICT, WITHOUT ROWID;
+
+        ALTER TABLE fetch_runs ADD COLUMN boundaries_fetched INTEGER NOT NULL DEFAULT 0;
+    """)
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001_initial,
     _migration_002_drop_photo_storage,
+    _migration_003_boundaries,
 )
 
 
@@ -378,6 +405,33 @@ def reconcile_presence(
     return cursor.rowcount
 
 
+def save_boundary(
+    conn: sqlite3.Connection, boundary: Boundary, *, now: str | None = None
+) -> None:
+    """Store one outline. Idempotent: re-fetching simply overwrites."""
+    conn.execute(
+        "INSERT INTO boundaries (name, slug, geometry, fetched_at, attempts) "
+        "VALUES (?, ?, ?, ?, 0) "
+        "ON CONFLICT (name) DO UPDATE SET slug = excluded.slug, "
+        "geometry = excluded.geometry, fetched_at = excluded.fetched_at, "
+        "attempts = 0, last_error = NULL",
+        (boundary.name, boundary.slug, boundary.geometry, now or utcnow()),
+    )
+
+
+def record_boundary_miss(
+    conn: sqlite3.Connection, name: str, slug: str, error: str
+) -> None:
+    """Count a failed lookup so an unresolvable buurt stops being retried."""
+    conn.execute(
+        "INSERT INTO boundaries (name, slug, attempts, last_error) "
+        "VALUES (?, ?, 1, ?) "
+        "ON CONFLICT (name) DO UPDATE SET attempts = attempts + 1, "
+        "last_error = excluded.last_error",
+        (name, slug, error[:200]),
+    )
+
+
 # --- run bookkeeping -------------------------------------------------------
 
 
@@ -395,7 +449,7 @@ def finish_run(conn: sqlite3.Connection, run_id: int, report: Any) -> None:
         conn.execute(
             "UPDATE fetch_runs SET finished_at = ?, pages_read = ?, seen = ?, "
             "new_listings = ?, price_changes = ?, status_changes = ?, delisted = ?, "
-            "details_fetched = ?, complete = ?, error = ? "
+            "details_fetched = ?, boundaries_fetched = ?, complete = ?, error = ? "
             "WHERE run_id = ?",
             (
                 utcnow(),
@@ -406,6 +460,7 @@ def finish_run(conn: sqlite3.Connection, run_id: int, report: Any) -> None:
                 report.status_changes,
                 report.delisted,
                 report.details_fetched,
+                report.boundaries_fetched,
                 int(report.complete),
                 report.error,
                 run_id,
@@ -427,6 +482,72 @@ def listings_needing_detail(
         "ORDER BY first_seen_at LIMIT ?",
         (-1 if limit is None else limit,),  # SQLite reads a negative LIMIT as "all"
     ).fetchall()
+
+
+def neighbourhoods_needing_boundary(
+    conn: sqlite3.Connection, limit: int | None = None
+) -> list[sqlite3.Row]:
+    """Buurten that appear on a live listing but have no outline yet.
+
+    A SQL predicate over stored state, like every other queue here -- so an
+    interrupted run resumes by simply running again.
+    """
+    return conn.execute(
+        "SELECT DISTINCT l.neighbourhood AS name FROM listings l "
+        "LEFT JOIN boundaries b ON b.name = l.neighbourhood "
+        "WHERE l.neighbourhood <> '' AND l.delisted_at IS NULL "
+        "  AND b.geometry IS NULL AND COALESCE(b.attempts, 0) < ? "
+        "ORDER BY l.neighbourhood LIMIT ?",
+        (MAX_BOUNDARY_ATTEMPTS, -1 if limit is None else limit),
+    ).fetchall()
+
+
+def neighbourhood_shapes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every outline we hold, with the buurt price level that colours it.
+
+    Deliberately **not** filtered: this is a context layer, so the outlines stay
+    put while the houses inside them come and go. `neighbourhood_price_m2` is a
+    per-buurt constant from funda, not an average of our sample, so MAX() just
+    picks that constant off any row carrying it.
+    """
+    return conn.execute(
+        "SELECT b.name, b.geometry, MAX(l.neighbourhood_price_m2) AS price_m2 "
+        "FROM boundaries b JOIN listings l ON l.neighbourhood = b.name "
+        "WHERE b.geometry IS NOT NULL "
+        "GROUP BY b.name, b.geometry ORDER BY b.name"
+    ).fetchall()
+
+
+CHOROPLETH_BINS = 5
+"""Colour steps in the buurt overlay. Five reads clearly; more does not."""
+
+
+def neighbourhood_price_scale(
+    conn: sqlite3.Connection, bins: int = CHOROPLETH_BINS
+) -> tuple[int, ...] | None:
+    """Quantile edges for the choropleth: `(lo, b1, ... b(n-1), hi)`.
+
+    **Quantiles, not a linear ramp.** Den Haag's buurt prices are strongly
+    right-skewed -- 3 533 to 7 641 with the mass under 5 500 -- so splitting the
+    range evenly put 69 of 102 buurten in the bottom two colours and 7 in the
+    top two, which draws as one flat wash. Equal-count bins put ~20 buurten in
+    each colour and the map actually differentiates.
+
+    Returns None when there is nothing to draw.
+    """
+    values = [
+        row["p"]
+        for row in conn.execute(
+            "SELECT MAX(l.neighbourhood_price_m2) p FROM boundaries b "
+            "JOIN listings l ON l.neighbourhood = b.name "
+            "WHERE b.geometry IS NOT NULL GROUP BY b.name ORDER BY p"
+        )
+        if row["p"] is not None
+    ]
+    if not values:
+        return None
+    edges = [values[len(values) * i // bins] for i in range(1, bins)]
+    return (values[0], *edges, values[-1])
 
 
 def get_listing(conn: sqlite3.Connection, listing_id: int) -> sqlite3.Row | None:
@@ -469,10 +590,14 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
                SUM(detail_fetched_at IS NOT NULL) AS enriched
         FROM listings
     """).fetchone()
+    shapes = conn.execute(
+        "SELECT COUNT(*) AS n FROM boundaries WHERE geometry IS NOT NULL"
+    ).fetchone()
     return {
         "total": row["total"] or 0,
         "active": row["active"] or 0,
         "enriched": row["enriched"] or 0,
+        "boundaries": shapes["n"] or 0,
     }
 
 

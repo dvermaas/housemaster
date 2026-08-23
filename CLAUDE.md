@@ -75,10 +75,10 @@ web      <- cli                   never fetches
 - `devalue.py` — decoder for Nuxt's devalue format: a *flat array* where integers **inside a container** are references into that same array (an integer in the slot a reference lands on is a literal, not a further hop), and a list whose first element is a string is a tagged value. Handles cycles and the `Ref`/`Reactive` wrappers. Knows nothing about funda.
 - `models.py` — frozen `Listing` / `Detail` / `Feature` / `SearchPage`, plus the mutable `FetchReport`. `PAGE_SIZE = 15`.
 - `net.py` — `get_text`, and nothing else. Every request impersonates Chrome here, so that guarantee is testable in one place.
-- `funda.py` — all funda knowledge: `fetch_html`, `extract_state`, `to_listing`, `to_detail`, `fetch_search_page`, `fetch_detail`. Knows nothing about storage or output.
+- `funda.py` — all funda knowledge: `fetch_html`, `extract_state`, `to_listing`, `to_detail`, `fetch_search_page`, `fetch_detail`, plus `neighbourhood_slug` / `fetch_boundary` for buurt outlines. Knows nothing about storage or output.
 - `db.py` — schema, `MIGRATIONS`, upserts, `Filters` + `query_listings`. Pure SQLite.
 - `photos.py` — `photo_url` and the CDN width ladder. **Zero imports**, pinned by a test: the web app depends on it, so it must stay unable to reach anything.
-- `pipeline.py` — `run_fetch`. Never prints; takes a `progress` callback.
+- `pipeline.py` — `run_fetch`: sweep, then `_enrich` (detail pages), then `_outline` (buurt boundaries). Never prints; takes a `progress` callback.
 - `render.py`, `cli.py`, `web/` — output formatting, entry point, Flask app.
 
 Search state lives at `state["pinia"]["search"]` (`listings`, `totalListingsCount`, `criteria`, `aggregations`); detail-page state at `state["data"]["cachedListingData_nl"]`, with neighbourhood stats under a `localInsights-<city>/<hood>` key that must be found by prefix. Pagination is `&search_result=N`, 15 per page.
@@ -99,6 +99,7 @@ Passing the wall depends only on the TLS/JA3 fingerprint, so every request must 
 - `price_history` has a surrogate key, not `(listing_id, observed_at)` — timestamps are second-granular and one run stamps every row identically, so a composite key silently swallows a second change in the same second.
 - Three id spaces on one listing: `globalId` (the primary key, and what search results call `id`), `tinyId` (the number in the detail URL), and a third in `friendlyUrlSlug`. Key on `globalId`; never join on the URL number.
 - `price_per_m2` is a **STORED** generated column — virtual ones cannot be indexed, and it is a sort key.
+- **Boundaries are keyed on the buurt *name***, because that is what a listing carries — funda never gives us a buurt identifier. The slug is derived (`neighbourhood_slug`) and is therefore a column, not the key.
 
 ## Photos
 
@@ -146,7 +147,18 @@ Three things that will break if disturbed:
 
 **Theme changes rebuild the map rather than restyling it.** `setStyle()` is the obvious call and it is a trap: it discards our layers, and there is no reliable moment to put them back — MapLibre 5 does not emit `style.load`, and `styledata` also fires for the *outgoing* style, so the re-add lands on a style about to be thrown away and the houses silently vanish. `retheme()` tears the map down and rebuilds it at the same camera, reusing the first-paint code path. Theme switching is rare and deliberate; a subtler mechanism is not worth the failure mode.
 
-`MAX_MAP_POINTS` caps the GeoJSON so a pathological filter cannot ship an unbounded payload. The map is the only part of the app that needs the network — OSM's tile policy forbids pre-downloading tiles, so they cannot be vendored like htmx and the fonts.
+`MAX_MAP_POINTS` caps the GeoJSON so a pathological filter cannot ship an unbounded payload. The map's tiles are the one thing that cannot be vendored — OSM's tile policy forbids pre-downloading them.
+
+### The buurt overlay
+
+A toggleable choropleth of the 105 Den Haag neighbourhoods, shaded by funda's own `neighbourhood_price_m2` for that buurt. Four things that are easy to get wrong:
+
+- **`/neighbourhoods.geojson` is deliberately unfiltered.** The outlines are geography, not data. Making them respond to the filter rail would have buurten blink out as you move a price slider, which reads as a bug. It is also why the map never reloads that source.
+- **Quantile bins, not a linear ramp** (`db.neighbourhood_price_scale`). Den Haag's buurt prices are strongly right-skewed — 3 533 to 7 641 with the mass under 5 500 — so even spacing put 69 of 102 buurten in the bottom two colours and drew as one flat wash. Equal-count edges put ~20 in each. The JS uses a `step` expression over those edges; the legend bar uses hard stops for the same reason.
+- **The fill's alpha differs per theme** (`--choro-fill`: 0.45 light, 0.32 dark). A translucent fill composites toward the basemap, so a bright wash over a dark basemap hides far more than a dark wash over a pale one. The ramp itself spans a wide lightness range because alpha compresses the visible spread to less than half of it.
+- **Outlines are added *before* the house layers** so markers always sit on top, and the toggle lives **outside** `#map`, so htmx replaces the button on every swap — `map.js` rebinds it in `sync()` and restores state from `localStorage`, exactly like the theme.
+
+The outline pass (`pipeline._outline`) is backlog-driven like every other queue: it drains to nothing after one run and costs zero requests thereafter, because boundaries do not move.
 
 ## Fetching strategy
 
@@ -184,6 +196,7 @@ Practical notes when driving the browser:
 
 - Optional CloakBrowser extras are **not** installed: `geoip2`, `aiohttp`, `websockets`. `geoip=True` needs `uv add geoip2` plus a DB download first.
 - `mcp__claude-in-chrome__*` may also be available; it drives the user's real Chrome and is not stealth — prefer the cloakbrowser server for funda.
-- One request yields 15 fully-detailed listings, so the full Den Haag sweep is ~35 requests. Pace them (`pipeline.DEFAULT_PACE`), and remember a detail page is fetched once per house ever. Photos cost no requests at all.
+- One request yields 15 fully-detailed listings. Pace them (`pipeline.DEFAULT_PACE`), and remember a detail page is fetched once per house ever, a buurt outline once per buurt ever, and photos cost no requests at all.
+- **funda's slug rule deletes periods rather than hyphenating them**: `Koningsplein e.o.` is `koningsplein-eo`. Three Den Haag buurten are named `... e.o.` and all three fail under a naive slugify.
 - Windows consoles default to cp1252 and mangle `€`/`m²`/Dutch names. `cli._use_utf8_output()` reconfigures the streams; any new entry point needs the same.
 - Ruff enables `T20` (no stray `print`) everywhere except `cli.py`. Library code returns data or calls a `progress` callback; the CLI prints. Keep it that way rather than widening the ignore.

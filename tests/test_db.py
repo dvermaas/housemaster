@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from housemaster import db
-from housemaster.models import Detail, Feature, FetchReport
+from housemaster.models import Boundary, Detail, Feature, FetchReport
 
 from .test_models import make_listing
 
@@ -298,7 +298,7 @@ def test_delisting_never_deletes_data(conn: sqlite3.Connection) -> None:
     delist(conn, set())
     delist(conn, set())
     assert db.get_listing(conn, 1) is not None
-    assert db.counts(conn) == {"total": 1, "active": 0, "enriched": 0}
+    assert db.counts(conn) == {"total": 1, "active": 0, "enriched": 0, "boundaries": 0}
 
 
 def test_a_relisted_house_is_un_delisted(conn: sqlite3.Connection) -> None:
@@ -439,3 +439,113 @@ def test_run_records_are_written(conn: sqlite3.Connection) -> None:
     assert row["seen"] == 45
     assert row["complete"] == 1
     assert row["finished_at"] is not None
+
+
+# --- neighbourhood outlines ------------------------------------------------
+
+RING = '{"type":"Polygon","coordinates":[[[4.1,52.0],[4.2,52.0],[4.2,52.1],[4.1,52.0]]]}'
+
+
+def test_a_buurt_with_listings_is_queued_for_an_outline(
+    conn: sqlite3.Connection,
+) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
+    assert [r["name"] for r in db.neighbourhoods_needing_boundary(conn)] == ["Spoorwijk"]
+
+
+def test_a_fetched_outline_leaves_the_queue(conn: sqlite3.Connection) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
+        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+    assert db.neighbourhoods_needing_boundary(conn) == []
+
+
+def test_an_unresolvable_buurt_stops_being_retried(conn: sqlite3.Connection) -> None:
+    # Three buurten in Den Haag are named `... e.o.`; if a slug rule ever stops
+    # resolving one, it must not be re-requested on every run forever.
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Nowhere"))
+    for _ in range(db.MAX_BOUNDARY_ATTEMPTS):
+        assert db.neighbourhoods_needing_boundary(conn)
+        with conn:
+            db.record_boundary_miss(conn, "Nowhere", "nowhere", "did not resolve")
+    assert db.neighbourhoods_needing_boundary(conn) == []
+
+
+def test_a_miss_that_later_succeeds_clears_its_attempts(
+    conn: sqlite3.Connection,
+) -> None:
+    # This is what let the fixed `e.o.` slug rule recover the three misses.
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
+        db.record_boundary_miss(conn, "Spoorwijk", "bad-slug", "did not resolve")
+        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+    row = conn.execute("SELECT * FROM boundaries WHERE name = 'Spoorwijk'").fetchone()
+    assert row["attempts"] == 0
+    assert row["last_error"] is None
+    assert row["slug"] == "spoorwijk"
+
+
+def test_shapes_carry_the_buurt_price_level(conn: sqlite3.Connection) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
+        db.save_detail(conn, detail_for(1))
+        conn.execute(
+            "UPDATE listings SET neighbourhood_price_m2 = 3929 WHERE listing_id = 1"
+        )
+        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+    rows = db.neighbourhood_shapes(conn)
+    assert [(r["name"], r["price_m2"]) for r in rows] == [("Spoorwijk", 3929)]
+    # One buurt: every quantile edge collapses onto the same value.
+    assert db.neighbourhood_price_scale(conn) == (3929, 3929, 3929, 3929, 3929, 3929)
+
+
+def test_shapes_ignore_filters_and_delisting(conn: sqlite3.Connection) -> None:
+    # The overlay is geography, not data: outlines must not blink out when the
+    # houses inside them stop matching.
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
+        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+    delist(conn, set())
+    delist(conn, set())
+    assert len(db.neighbourhood_shapes(conn)) == 1
+
+
+def test_an_unfetched_outline_is_not_offered_to_the_map(
+    conn: sqlite3.Connection,
+) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Nowhere"))
+        db.record_boundary_miss(conn, "Nowhere", "nowhere", "did not resolve")
+    assert db.neighbourhood_shapes(conn) == []
+    assert db.neighbourhood_price_scale(conn) is None
+
+
+def test_the_scale_uses_quantiles_not_an_even_split(conn: sqlite3.Connection) -> None:
+    """The reason the overlay is legible at all.
+
+    Buurt prices are strongly right-skewed. With evenly spaced edges nearly
+    every buurt lands in the bottom bins and the map draws as one flat wash;
+    equal-count edges put a fifth of them in each colour.
+    """
+    prices = [3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 9000]
+    with conn:
+        for index, price in enumerate(prices, start=1):
+            name = f"Buurt{index:02d}"
+            db.upsert_listing(conn, make_listing(listing_id=index, neighbourhood=name))
+            conn.execute(
+                "UPDATE listings SET neighbourhood_price_m2 = ? WHERE listing_id = ?",
+                (price, index),
+            )
+            db.save_boundary(conn, Boundary(name, name.lower(), RING))
+
+    scale = db.neighbourhood_price_scale(conn, bins=5)
+    assert scale is not None
+    lo, *edges, hi = scale
+    assert (lo, hi) == (3500, 9000)
+
+    # Every bin holds two of the ten buurten -- the 9000 outlier does not drag
+    # the edges the way an even split over 3500..9000 would.
+    counts = [sum(sum(p >= e for e in edges) == k for p in prices) for k in range(5)]
+    assert counts == [2, 2, 2, 2, 2]

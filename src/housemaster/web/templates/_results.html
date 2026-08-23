@@ -1,5 +1,7 @@
 {# Swapped whole by htmx; also included directly on first render. #}
 <main id="results" data-view="{{ view }}" data-geojson="{{ geojson_url }}"
+      data-shapes="{{ shapes_url }}"
+      {% if hood_scale %}data-hood-scale="{{ hood_scale | join(",") }}"{% endif %}
       {% if bounds %}data-bounds="{{ bounds | join(",") }}"{% endif %}>
   {# Inside #results, not the rail, so it is reserialised on every swap: the
      filter form must carry the current view or changing a filter while on the

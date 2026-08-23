@@ -15,7 +15,7 @@ import pytest
 
 from housemaster import db, pipeline
 from housemaster.funda import BlockedError, PayloadError
-from housemaster.models import PAGE_SIZE, Detail, Feature, SearchPage
+from housemaster.models import PAGE_SIZE, Boundary, Detail, Feature, SearchPage
 
 from .test_models import make_listing
 
@@ -40,6 +40,8 @@ class FakeFunda:
         self.prices: dict[int, int] = {}
         self.statuses: dict[int, str] = {}
         self.detail_error: Exception | None = None
+        self.boundary_calls: list[str] = []
+        self.unresolvable: set[str] = set()
 
     def search(self, _url: str, page: int = 1) -> SearchPage:
         self.page_calls.append(page)
@@ -75,9 +77,16 @@ class FakeFunda:
             features=(Feature("bouw", "Bouw", 0, "Bouwjaar", "1931"),),
         )
 
+    def boundary(self, name: str) -> Boundary | None:
+        self.boundary_calls.append(name)
+        if name in self.unresolvable:
+            return None  # funda answered, but not with a neighbourhood
+        return Boundary(name, name.lower(), '{"type":"Polygon","coordinates":[]}')
+
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
         monkeypatch.setattr(pipeline, "fetch_search_page", self.search)
         monkeypatch.setattr(pipeline, "fetch_detail", self.detail)
+        monkeypatch.setattr(pipeline, "fetch_boundary", self.boundary)
         monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None)
         return self
 
@@ -89,6 +98,7 @@ def funda(monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
 
 
 def run(conn: sqlite3.Connection, **kwargs: object) -> object:
+    kwargs.setdefault("with_boundaries", False)
     options = pipeline.FetchOptions(search_url="https://example.test/zoeken", **kwargs)
     return pipeline.run_fetch(conn, options)
 
@@ -288,3 +298,50 @@ def test_progress_messages_are_emitted_not_printed(
     assert any("page 1/" in m for m in messages)
     # The pipeline is a library: printing is the CLI's job.
     assert capsys.readouterr().out == ""
+
+
+# --- the outline pass ------------------------------------------------------
+
+
+def test_outlines_are_fetched_once_and_then_never_again(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    report = run(conn, with_boundaries=True)
+    assert report.boundaries_fetched == 1  # every fake listing is in "Centrum"
+    assert funda.boundary_calls == ["Centrum"]
+
+    # Boundaries do not move, so a second run must cost zero requests.
+    run(conn, with_boundaries=True)
+    assert funda.boundary_calls == ["Centrum"]
+
+
+def test_an_unresolvable_buurt_is_retried_then_dropped(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    funda.unresolvable = {"Centrum"}
+    for _ in range(db.MAX_BOUNDARY_ATTEMPTS):
+        run(conn, with_boundaries=True)
+    assert len(funda.boundary_calls) == db.MAX_BOUNDARY_ATTEMPTS
+
+    run(conn, with_boundaries=True)
+    assert len(funda.boundary_calls) == db.MAX_BOUNDARY_ATTEMPTS  # gave up
+
+
+def test_the_outline_pass_can_be_skipped(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    run(conn, with_boundaries=False)
+    assert funda.boundary_calls == []
+
+
+def test_a_block_during_the_outline_pass_stops_without_losing_the_run(
+    conn: sqlite3.Connection, funda: FakeFunda, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def blocked(_name: str) -> Boundary | None:
+        raise BlockedError("no __NUXT_DATA__ -- likely the Akamai interstitial")
+
+    monkeypatch.setattr(pipeline, "fetch_boundary", blocked)
+    report = run(conn, with_boundaries=True)
+    # The sweep already committed; only the outline pass is abandoned.
+    assert report.error is not None
+    assert db.counts(conn)["total"] == 4

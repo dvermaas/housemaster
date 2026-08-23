@@ -13,7 +13,7 @@ import pytest
 from flask.testing import FlaskClient
 
 from housemaster import db
-from housemaster.models import Detail, Feature
+from housemaster.models import Boundary, Detail, Feature
 from housemaster.web import create_app
 
 from .test_models import make_listing
@@ -61,6 +61,21 @@ def cache(tmp_path: Path) -> Path:
                 features=(Feature("bouw", "Bouw", 0, "Bouwjaar", "1931-1944"),),
             ),
         )
+    # One buurt outline, so the overlay has something to draw.
+    with conn:
+        conn.execute(
+            "UPDATE listings SET neighbourhood_price_m2 = 3929 WHERE listing_id = 1"
+        )
+        db.save_boundary(
+            conn,
+            Boundary(
+                "Spoorwijk",
+                "spoorwijk",
+                '{"type":"Polygon","coordinates":'
+                "[[[4.1,52.0],[4.2,52.0],[4.2,52.1],[4.1,52.0]]]}",
+            ),
+        )
+
     # A price drop on house 3.
     with conn:
         db.upsert_listing(
@@ -377,3 +392,48 @@ def test_a_relative_db_path_is_resolved(
     assert app.config["DB_PATH"].is_absolute()
     with app.test_client() as relative_client:
         assert relative_client.get("/").status_code == 200
+
+
+# --- the buurt overlay -----------------------------------------------------
+
+
+def test_the_outline_feed_is_geojson_with_the_price_level(client: FlaskClient) -> None:
+    payload = client.get("/neighbourhoods.geojson").get_json()
+    assert payload["type"] == "FeatureCollection"
+    feature = payload["features"][0]
+    assert feature["geometry"]["type"] == "Polygon"
+    assert feature["properties"] == {"name": "Spoorwijk", "price_m2": 3929}
+    # The id is what MapLibre feature-state hover keys on.
+    assert feature["id"] == 0
+
+
+def test_the_outline_feed_ignores_filters(client: FlaskClient) -> None:
+    # Geography, not data: narrowing the price range must not remove outlines.
+    wide = client.get("/neighbourhoods.geojson").get_json()
+    narrow = client.get("/neighbourhoods.geojson?price_max=1").get_json()
+    assert len(narrow["features"]) == len(wide["features"]) == 1
+
+
+def test_the_map_view_carries_what_the_overlay_needs(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    assert 'data-shapes="/neighbourhoods.geojson"' in page
+    assert 'data-hood-scale="3929,3929,3929,3929,3929,3929"' in page
+    assert 'id="hood-toggle"' in page
+
+
+def test_the_toggle_is_outside_the_filter_form(client: FlaskClient) -> None:
+    # It changes what the map draws, not what gets submitted. If it ever became
+    # a named control inside #results it would start round-tripping as a filter.
+    page = body(client.get("/?view=map"))
+    toggle = page[page.index('id="hood-toggle"') - 200 : page.index('id="hood-toggle"')]
+    assert "name=" not in toggle
+
+
+def test_the_ramp_legend_reads_from_the_same_range(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    assert 'id="hood-ramp"' in page
+    assert "3.929" in page  # compact-formatted, matching the layer's domain
+
+
+def test_the_grid_view_does_not_ship_the_overlay(client: FlaskClient) -> None:
+    assert 'id="hood-toggle"' not in body(client.get("/"))

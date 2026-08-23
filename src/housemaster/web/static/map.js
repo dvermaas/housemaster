@@ -9,6 +9,10 @@
  * htmx swaps #results on every filter change, but the map node carries
  * hx-preserve, so we only push new data into the existing source -- the
  * viewport the user panned to survives.
+ *
+ * Two data layers, with different lifetimes:
+ *   houses  -- the filtered set, reloaded on every swap
+ *   buurten -- outlines, a context layer; constant URL, loaded once, toggled
  */
 (function () {
   "use strict";
@@ -35,9 +39,25 @@
   };
   const UNKNOWN = "#c4c7c0";
 
+  const HOOD_KEY = "housemaster-hoods";
+  const HOOD_LAYERS = ["hoods-fill", "hoods-line"];
+
   let map = null;
   let popup = null;
   let pendingUrl = null;
+  let hoodsOn = false;
+  let hovered = null;
+
+  const css = (token) =>
+    getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+
+  function hoodsWanted() {
+    try {
+      return localStorage.getItem(HOOD_KEY) === "1";
+    } catch (_) {
+      return false; // private mode: the overlay simply starts off
+    }
+  }
 
   const paintByLabel = () => {
     // ["match", input, key, value, ..., fallback]
@@ -60,12 +80,147 @@
         /* the provider renamed a layer; the default style still works */
       }
     };
-    const css = (token) =>
-      getComputedStyle(document.documentElement).getPropertyValue(token).trim();
     tweak("background", "background-color", css("--paper"));
     tweak("water", "fill-color", css("--paper-sunk"));
     tweak("landcover-grass", "fill-color", css("--paper-sunk"));
     tweak("park", "fill-color", css("--paper-sunk"));
+  }
+
+  /** Colour a buurt by funda's own price level for it.
+   *
+   *  The five colours come from CSS custom properties, like --basemap does, so
+   *  the light/dark ramp lives in the stylesheet and a theme rebuild picks up
+   *  the other half for free.
+   *
+   *  A `step`, not an `interpolate`: the scale arrives as quantile edges from
+   *  SQL, because Den Haag's buurt prices are skewed enough that even spacing
+   *  draws as one flat wash. See db.neighbourhood_price_scale. */
+  function rampExpression(scale) {
+    const colours = [1, 2, 3, 4, 5].map((i) => css(`--choro-${i}`));
+    const missing = css("--choro-none");
+    // scale is (lo, b1..b4, hi); the interior edges are the step boundaries.
+    const edges = scale ? scale.slice(1, -1) : [];
+    if (!edges.length) return colours[2] || missing;
+
+    const steps = [];
+    edges.forEach((edge, i) => steps.push(edge, colours[i + 1]));
+    return [
+      "case",
+      ["==", ["get", "price_m2"], null],
+      missing,
+      ["step", ["to-number", ["get", "price_m2"]], colours[0], ...steps],
+    ];
+  }
+
+  /** Outlines go in BEFORE the houses so the markers always sit on top -- a
+   *  translucent wash over a house dot would defeat the point of both. */
+  function addBoundaries(url, scale) {
+    for (const id of HOOD_LAYERS) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
+    if (map.getSource("hoods")) map.removeSource("hoods");
+    if (!url) return;
+
+    map.addSource("hoods", { type: "geojson", data: url });
+    const visibility = hoodsOn ? "visible" : "none";
+
+    map.addLayer({
+      id: "hoods-fill",
+      type: "fill",
+      source: "hoods",
+      layout: { visibility },
+      paint: {
+        "fill-color": rampExpression(scale),
+        // Transparent enough to read streets and water straight through it.
+        "fill-opacity": [
+          "case",
+          ["boolean", ["feature-state", "hover"], false],
+          Number(css("--choro-fill-hover")) || 0.52,
+          Number(css("--choro-fill")) || 0.34,
+        ],
+      },
+    });
+
+    map.addLayer({
+      id: "hoods-line",
+      type: "line",
+      source: "hoods",
+      layout: { visibility, "line-join": "round" },
+      paint: {
+        "line-color": css("--choro-5"),
+        "line-width": ["case", ["boolean", ["feature-state", "hover"], false], 2, 0.8],
+        "line-opacity": 0.7,
+      },
+    });
+  }
+
+  /** Bound once per map, like the house handlers, for the same reason. */
+  function bindHoodEvents() {
+    const readout = () => document.getElementById("hood-readout");
+
+    map.on("mousemove", "hoods-fill", (event) => {
+      const feature = event.features && event.features[0];
+      if (!feature || feature.id === hovered) return;
+      clearHover();
+      hovered = feature.id;
+      map.setFeatureState({ source: "hoods", id: hovered }, { hover: true });
+
+      const node = readout();
+      if (!node) return;
+      const price = feature.properties.price_m2;
+      node.textContent = price
+        ? `${feature.properties.name} · € ${Number(price).toLocaleString("nl-NL")}/m²`
+        : feature.properties.name;
+      node.hidden = false;
+    });
+
+    map.on("mouseleave", "hoods-fill", () => {
+      clearHover();
+      const node = readout();
+      if (node) node.hidden = true;
+    });
+  }
+
+  function clearHover() {
+    if (hovered === null || !map || !map.getSource("hoods")) return;
+    map.setFeatureState({ source: "hoods", id: hovered }, { hover: false });
+    hovered = null;
+  }
+
+  /** Reflect `hoodsOn` into the map, the button and the ramp legend. */
+  function applyHoods() {
+    if (map) {
+      for (const id of HOOD_LAYERS) {
+        if (map.getLayer(id)) {
+          map.setLayoutProperty(id, "visibility", hoodsOn ? "visible" : "none");
+        }
+      }
+      if (!hoodsOn) clearHover();
+    }
+    const button = document.getElementById("hood-toggle");
+    if (button) button.setAttribute("aria-pressed", String(hoodsOn));
+    const ramp = document.getElementById("hood-ramp");
+    if (ramp) ramp.hidden = !hoodsOn;
+    const readout = document.getElementById("hood-readout");
+    if (readout && !hoodsOn) readout.hidden = true;
+  }
+
+  /** The toggle lives outside #map, so htmx replaces the element on every
+   *  swap. Rebinding a fresh node is simpler and safer than trying to preserve
+   *  it, and the state itself lives in localStorage rather than in the DOM. */
+  function bindToggle() {
+    const button = document.getElementById("hood-toggle");
+    if (!button || button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => {
+      hoodsOn = !hoodsOn;
+      try {
+        localStorage.setItem(HOOD_KEY, hoodsOn ? "1" : "0");
+      } catch (_) {
+        /* private mode: the toggle still works for this page view */
+      }
+      applyHoods();
+    });
   }
 
   /** Idempotent: a theme change calls this again on the new style, and
@@ -168,7 +323,7 @@
     else pendingUrl = url;
   }
 
-  function init(container, url, bounds, camera) {
+  function init(container, cfg, camera) {
     map = new maplibregl.Map({
       container,
       style: styleUrl(),
@@ -183,11 +338,29 @@
 
     map.on("load", () => {
       styleBasemap();
-      addHouses(pendingUrl || url);
+      // Order matters: outlines first, houses on top of them.
+      addBoundaries(cfg.shapes, cfg.scale);
+      addHouses(pendingUrl || cfg.houses);
+      bindHoodEvents();
       bindHouseEvents();
-      if (!camera) fit(bounds);
+      applyHoods();
+      if (!camera) fit(cfg.bounds);
       pendingUrl = null;
     });
+  }
+
+  /** Everything the map needs, read off the swapped-in #results element. */
+  function readConfig(results) {
+    const scale = (results.dataset.hoodScale || "")
+      .split(",")
+      .map(Number)
+      .filter((n) => !Number.isNaN(n));
+    return {
+      houses: results.dataset.geojson,
+      shapes: results.dataset.shapes,
+      scale: scale.length >= 3 ? scale : null,
+      bounds: results.dataset.bounds,
+    };
   }
 
   /** Drop a map whose container the DOM no longer holds.
@@ -205,6 +378,7 @@
     map = null;
     popup = null;
     pendingUrl = null;
+    hovered = null;
   }
 
   /** Called on first paint and after every htmx swap. */
@@ -218,14 +392,19 @@
     if (!container) return;
 
     dropIfDetached();
-    const url = results.dataset.geojson;
+    hoodsOn = hoodsWanted();
+    const cfg = readConfig(results);
     if (!map) {
-      init(container, url, results.dataset.bounds);
+      init(container, cfg);
     } else {
-      setData(url);
+      setData(cfg.houses);
       // The preserved node may have been detached and reinserted by the swap.
       map.resize();
     }
+    // The controls are outside #map, so the swap replaced them: rebind and
+    // restore. Safe before the style loads -- applyHoods skips missing layers.
+    bindToggle();
+    applyHoods();
   }
 
   /** Swap the basemap when the theme changes.
@@ -255,7 +434,8 @@
     map = null;
     popup = null;
     pendingUrl = null;
-    init(container, results.dataset.geojson, null, camera);
+    hovered = null;
+    init(container, readConfig(results), camera);
   }
 
   document.addEventListener("DOMContentLoaded", sync);

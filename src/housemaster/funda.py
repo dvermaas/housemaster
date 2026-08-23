@@ -10,13 +10,22 @@ with an interstitial page, so `fetch_html` validates the body instead.
 
 from __future__ import annotations
 
+import json
 import re
+import unicodedata
 from collections.abc import Iterator
 from typing import Any
 
 from housemaster import net
 from housemaster.devalue import parse
-from housemaster.models import PAGE_SIZE, Detail, Feature, Listing, SearchPage
+from housemaster.models import (
+    PAGE_SIZE,
+    Boundary,
+    Detail,
+    Feature,
+    Listing,
+    SearchPage,
+)
 
 BASE_URL = "https://www.funda.nl"
 DEFAULT_SEARCH_URL = (
@@ -179,6 +188,85 @@ def to_detail(state: Any) -> Detail:
         neighbourhood_inhabitants=insights.get("inhabitants"),
         features=features,
     )
+
+
+# --- neighbourhood outlines ------------------------------------------------
+
+_SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+
+def neighbourhood_slug(name: str) -> str:
+    """funda's URL form of a buurt name.
+
+    `Groente- en Fruitmarkt` becomes `groente-en-fruitmarkt`.
+
+    Derived rather than looked up, because the search payload gives us buurt
+    *names* on every listing but never their identifiers. Verified against
+    deliberately awkward names -- accents, commas, hyphens and multi-word
+    connectives all round-trip. It is not perfect (`Van Hoytemastraat e.o.`
+    does not resolve), so callers must treat a miss as normal.
+    """
+    folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    # Periods and apostrophes are deleted, not hyphenated: funda writes
+    # `Koningsplein e.o.` as `koningsplein-eo`, so `e.o.` collapses to one word.
+    squashed = folded.lower().replace("'", "").replace(".", "")
+    return _SLUG_STRIP.sub("-", squashed).strip("-")
+
+
+def area_url(city_slug: str, buurt_slug: str) -> str:
+    return f"{BASE_URL}/zoeken/koop?selected_area={city_slug}/{buurt_slug}"
+
+
+def to_boundary(state: Any, name: str, slug: str) -> Boundary | None:
+    """Pull the buurt outline out of a search page scoped to that buurt.
+
+    funda echoes the resolved area back in `criteria.selected_area`, carrying a
+    `geographicalArea` map of rings. One entry is a Polygon; several are a
+    MultiPolygon -- Den Haag has buurten split by water, so both occur.
+
+    Returns None when the slug did not resolve to a neighbourhood, which is a
+    normal outcome rather than an error: funda answers with the unfiltered
+    search rather than a 404.
+    """
+    try:
+        selected = state["pinia"]["search"]["criteria"]["selected_area"]
+    except KeyError, TypeError:
+        return None
+    if not selected:
+        return None
+
+    area = selected[0]
+    if area.get("areaType") != "neighborhood":
+        return None  # the slug missed; funda fell back to a wider area
+
+    rings = [
+        entry["coordinates"]
+        for _, entry in sorted((area.get("geographicalArea") or {}).items())
+        if entry.get("coordinates")
+    ]
+    if not rings:
+        return None
+
+    geometry = (
+        {"type": "Polygon", "coordinates": rings[0]}
+        if len(rings) == 1
+        else {"type": "MultiPolygon", "coordinates": rings}
+    )
+    return Boundary(
+        name=area.get("name") or name,
+        slug=slug,
+        # separators= keeps 100+ polygons from carrying a KB of whitespace each.
+        geometry=json.dumps(geometry, separators=(",", ":")),
+    )
+
+
+def fetch_boundary(name: str, city_slug: str = "den-haag") -> Boundary | None:
+    """Fetch one buurt outline. None means the slug did not resolve."""
+    slug = neighbourhood_slug(name)
+    if not slug:
+        return None
+    state = extract_state(fetch_html(area_url(city_slug, slug)))
+    return to_boundary(state, name, slug)
 
 
 def fetch_search_page(base_url: str, page: int = 1) -> SearchPage:

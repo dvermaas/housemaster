@@ -8,6 +8,7 @@ reloads or bookmarks it, which is the classic htmx footgun.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -109,6 +110,10 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
         "view": view,
         "bounds": db.map_bounds(conn, filters) if view == "map" else None,
         "geojson_url": url_for("browse.houses_geojson", **geojson_args),
+        # The outlines are a context layer, not part of the filtered set, so
+        # this URL is constant and the map never has to reload it.
+        "shapes_url": url_for("browse.neighbourhoods_geojson"),
+        "hood_scale": db.neighbourhood_price_scale(conn) if view == "map" else None,
         "other_view": "grid" if view == "map" else "map",
         "view_url": url_for(
             "browse.index",
@@ -175,6 +180,38 @@ def houses_geojson() -> Response:
                     },
                 }
                 for row in rows
+            ],
+        }
+    )
+
+
+@bp.route("/neighbourhoods.geojson")
+def neighbourhoods_geojson() -> Response:
+    """Buurt outlines, coloured by funda's own price level for that buurt.
+
+    Unfiltered on purpose: this is the map's context layer. Outlines that
+    appeared and vanished as you moved a price slider would read as data rather
+    than as geography.
+
+    `geometry` is already-serialised GeoJSON from the database, so it is spliced
+    in with `json.loads` rather than rebuilt -- funda's ring order and winding
+    are preserved exactly as fetched.
+    """
+    rows = db.neighbourhood_shapes(_conn())
+    return jsonify(
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": index,
+                    "geometry": json.loads(row["geometry"]),
+                    "properties": {
+                        "name": row["name"],
+                        "price_m2": row["price_m2"],
+                    },
+                }
+                for index, row in enumerate(rows)
             ],
         }
     )

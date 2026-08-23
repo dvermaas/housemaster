@@ -5,16 +5,43 @@
 
   The data itself is not in this markup: map.js reads the geojson URL off
   #results after every swap and hands it to the live source.
+
+  Everything *outside* #map is re-rendered on each swap, so map.js rebinds the
+  buurt toggle every time and restores its state from localStorage.
 #}
 <div class="mapwrap">
   <div id="map" hx-preserve="true" aria-label="Map of matching houses"></div>
 
-  <div class="maplegend">
-    <span class="maplegend-title">Energy</span>
-    {% for label in ["A", "B", "C", "D", "E", "F", "G"] %}
-      <span class="chip" data-label="{{ label }}"
-            style="--swatch: var(--e-{{ label | energy_class }})">{{ label }}</span>
-    {% endfor %}
+  <div class="mapreadout" id="hood-readout" hidden aria-live="polite"></div>
+
+  <div class="maptools">
+    {# A real button, not a checkbox: it changes what the map draws, not what
+       the filter form submits. Keeping it out of the form is deliberate --
+       #results is reserialised on every swap and this is not a filter. #}
+    <button type="button" class="maptoggle" id="hood-toggle" aria-pressed="false">
+      <span class="maptoggle-swatch" aria-hidden="true"></span>
+      <span>Buurten</span>
+    </button>
+
+    {# Labels rendered server-side from the same range the layer is coloured by,
+       so the legend cannot drift out of step with the map. #}
+    <div class="mapramp" id="hood-ramp" hidden>
+      <span class="maplegend-title">€/m²</span>
+      {% if hood_scale %}
+        <span class="fig">{{ hood_scale[0] | compact }}</span>
+        <span class="mapramp-bar" aria-hidden="true"
+              title="Equal-count bins: about a fifth of buurten per step"></span>
+        <span class="fig">{{ hood_scale[-1] | compact }}</span>
+      {% endif %}
+    </div>
+
+    <div class="maplegend">
+      <span class="maplegend-title">Energy</span>
+      {% for label in ["A", "B", "C", "D", "E", "F", "G"] %}
+        <span class="chip" data-label="{{ label }}"
+              style="--swatch: var(--e-{{ label | energy_class }})">{{ label }}</span>
+      {% endfor %}
+    </div>
   </div>
 
   <noscript>

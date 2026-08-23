@@ -94,6 +94,20 @@ class Detail:
     features: tuple[Feature, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class Boundary:
+    """One neighbourhood outline, as funda draws it.
+
+    `geometry` is a serialised GeoJSON geometry (Polygon or MultiPolygon) ready
+    to drop straight into a FeatureCollection -- the web layer never has to know
+    how funda shaped it.
+    """
+
+    name: str
+    slug: str
+    geometry: str
+
+
 @dataclass(slots=True)
 class FetchReport:
     """Counts for one `fetch` run. Mutable: the pipeline accumulates into it."""
@@ -106,6 +120,7 @@ class FetchReport:
     status_changes: int = 0
     delisted: int = 0
     details_fetched: int = 0
+    boundaries_fetched: int = 0
     complete: bool = False
     """True only when every search page was read. Gates delisted-marking."""
     error: str | None = None

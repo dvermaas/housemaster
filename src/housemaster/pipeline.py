@@ -22,8 +22,10 @@ from housemaster.funda import (
     DEFAULT_SEARCH_URL,
     BlockedError,
     FundaError,
+    fetch_boundary,
     fetch_detail,
     fetch_search_page,
+    neighbourhood_slug,
 )
 from housemaster.models import FetchReport
 
@@ -41,6 +43,7 @@ class FetchOptions:
     max_pages: int | None = None
     max_details: int | None = None
     with_detail: bool = True
+    with_boundaries: bool = True
     pace: float = DEFAULT_PACE
 
 
@@ -80,6 +83,8 @@ def run_fetch(
 
     if options.with_detail:
         _enrich(conn, options, report, progress)
+    if options.with_boundaries:
+        _outline(conn, options, report, progress)
 
     db.finish_run(conn, run_id, report)
     return report
@@ -158,3 +163,50 @@ def _enrich(
         if index % 25 == 0:
             progress(f"  {index}/{len(pending)} details")
         time.sleep(options.pace)
+
+
+def _outline(
+    conn: sqlite3.Connection,
+    options: FetchOptions,
+    report: FetchReport,
+    progress: Progress,
+) -> None:
+    """Fetch the outline of every buurt that does not have one yet.
+
+    Boundaries do not move, so this drains to nothing after the first run and
+    costs zero requests thereafter. A buurt whose slug does not resolve is
+    recorded as a miss rather than retried forever -- see MAX_BOUNDARY_ATTEMPTS.
+    """
+    pending = db.neighbourhoods_needing_boundary(conn)
+    if not pending:
+        return
+    progress(f"fetching {len(pending)} neighbourhood outlines")
+
+    missed = 0
+    for index, row in enumerate(pending, start=1):
+        name = row["name"]
+        try:
+            boundary = fetch_boundary(name)
+        except BlockedError as exc:
+            report.error = str(exc)
+            progress("blocked during boundary pass -- stopping")
+            return
+        except FundaError as exc:
+            boundary, reason = None, str(exc)
+        else:
+            reason = "slug did not resolve to a neighborhood"
+
+        with conn:
+            if boundary is not None:
+                db.save_boundary(conn, boundary)
+                report.boundaries_fetched += 1
+            else:
+                missed += 1
+                db.record_boundary_miss(conn, name, neighbourhood_slug(name), reason)
+
+        if index % 25 == 0:
+            progress(f"  {index}/{len(pending)} outlines")
+        time.sleep(options.pace)
+
+    if missed:
+        progress(f"  {missed} buurten have no resolvable outline")

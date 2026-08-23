@@ -6,6 +6,7 @@ skipped unless HOUSEMASTER_NETWORK_TESTS is set.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -307,3 +308,76 @@ def test_target_search_is_still_reachable() -> None:
     assert len(page.listings) == funda.PAGE_SIZE
     assert page.total_results > 0
     assert all(x.url.startswith("https://www.funda.nl/detail/") for x in page.listings)
+
+
+# --- neighbourhood outlines ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Bezuidenhout-Oost", "bezuidenhout-oost"),
+        ("Groente- en Fruitmarkt", "groente-en-fruitmarkt"),
+        ("Zijden, Steden en Zichten", "zijden-steden-en-zichten"),
+        # Periods are deleted, not hyphenated: funda writes `e.o.` as `eo`.
+        ("Koningsplein e.o.", "koningsplein-eo"),
+        ("Van Hoytemastraat e.o.", "van-hoytemastraat-eo"),
+    ],
+)
+def test_neighbourhood_slug(name: str, expected: str) -> None:
+    assert funda.neighbourhood_slug(name) == expected
+
+
+def _area_state(area: dict[str, Any] | None) -> dict[str, Any]:
+    return {"pinia": {"search": {"criteria": {"selected_area": [area] if area else []}}}}
+
+
+def test_a_single_ring_becomes_a_polygon() -> None:
+    ring = [[[4.1, 52.0], [4.2, 52.0], [4.2, 52.1], [4.1, 52.0]]]
+    boundary = funda.to_boundary(
+        _area_state(
+            {
+                "areaType": "neighborhood",
+                "name": "Spoorwijk",
+                "geographicalArea": {"0": {"type": "polygon", "coordinates": ring}},
+            }
+        ),
+        "Spoorwijk",
+        "spoorwijk",
+    )
+    assert boundary is not None
+    assert json.loads(boundary.geometry) == {"type": "Polygon", "coordinates": ring}
+
+
+def test_several_rings_become_a_multipolygon() -> None:
+    # Den Haag has buurten split by water, so this really happens.
+    a = [[[4.1, 52.0], [4.2, 52.0], [4.2, 52.1], [4.1, 52.0]]]
+    b = [[[4.3, 52.0], [4.4, 52.0], [4.4, 52.1], [4.3, 52.0]]]
+    boundary = funda.to_boundary(
+        _area_state(
+            {
+                "areaType": "neighborhood",
+                "name": "Laak",
+                "geographicalArea": {"0": {"coordinates": a}, "1": {"coordinates": b}},
+            }
+        ),
+        "Laak",
+        "laak",
+    )
+    assert boundary is not None
+    assert json.loads(boundary.geometry) == {
+        "type": "MultiPolygon",
+        "coordinates": [a, b],
+    }
+
+
+def test_a_slug_that_missed_returns_none_rather_than_raising() -> None:
+    # funda answers an unresolvable buurt slug with the *city* search, not a
+    # 404 -- so the areaType is the only way to tell, and a miss is normal.
+    assert (
+        funda.to_boundary(
+            _area_state({"areaType": "city", "name": "Den Haag"}), "Nowhere", "nowhere"
+        )
+        is None
+    )
+    assert funda.to_boundary(_area_state(None), "Nowhere", "nowhere") is None

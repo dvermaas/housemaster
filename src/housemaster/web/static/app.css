@@ -45,6 +45,18 @@
   --rail: 268px;
   --gap: 20px;
 
+  /* Choropleth ramp for the buurt overlay: a sequential wash of the single
+     accent, ending on --blueprint itself. Deliberately unsaturated next to the
+     NEN scale -- the houses stay the only vivid thing on the map. */
+  /* The ramp spans a wide lightness range on purpose. A translucent fill
+     composites toward the basemap, so at ~45% alpha the visible spread is less
+     than half the ramp's own -- a tighter ramp draws as one flat wash. */
+  --choro-1: #e8eef5; --choro-2: #bcd0e3; --choro-3: #85a9cb;
+  --choro-4: #4a7ba9; --choro-5: #163f6b;
+  --choro-none: #c9ccc5;      /* buurt with no price level */
+  --choro-fill: 0.45;         /* see-through: the basemap has to read through it */
+  --choro-fill-hover: 0.62;
+
   --scrim: rgb(16 18 21 / 0.95);
   --shadow: 0 2px 10px rgb(22 24 28 / 0.13);
   --basemap: positron;      /* read by map.js */
@@ -68,6 +80,16 @@
     --blueprint-wash: #1b2430;
     --drop: #e2795d;
     --drop-wash: #2a1d1a;
+    /* Cyanotype half: same roles, inverted ground. Dearest is the brightest
+       line rather than the deepest wash. */
+    --choro-1: #1f3145; --choro-2: #2e4d6d; --choro-3: #426e99;
+    --choro-4: #5b91c2; --choro-5: #8fbde8;
+    --choro-none: #39414c;
+    /* Lower than light mode on purpose: a bright wash over a dark basemap
+       hides far more than a dark wash over a pale one. */
+    --choro-fill: 0.32;
+    --choro-fill-hover: 0.50;
+
     --scrim: rgb(6 8 11 / 0.96);
     --shadow: 0 2px 14px rgb(0 0 0 / 0.5);
     --basemap: dark;
@@ -89,6 +111,16 @@
   --blueprint-wash: #1b2430;
   --drop: #e2795d;
   --drop-wash: #2a1d1a;
+  /* Cyanotype half: same roles, inverted ground. Dearest is the brightest
+     line rather than the deepest wash. */
+  --choro-1: #1f3145; --choro-2: #2e4d6d; --choro-3: #426e99;
+  --choro-4: #5b91c2; --choro-5: #8fbde8;
+  --choro-none: #39414c;
+  /* Lower than light mode on purpose: a bright wash over a dark basemap
+     hides far more than a dark wash over a pale one. */
+  --choro-fill: 0.32;
+  --choro-fill-hover: 0.50;
+
   --scrim: rgb(6 8 11 / 0.96);
   --shadow: 0 2px 14px rgb(0 0 0 / 0.5);
   --basemap: dark;
@@ -630,17 +662,96 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
 .mapwrap::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
 .mapwrap::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
 
-.maplegend {
+/* Bottom-left stack: the buurt toggle, its ramp, then the energy key. One
+   column so the three read as one instrument panel rather than scattered
+   chrome. */
+.maptools {
   position: absolute;
   left: 12px;
   bottom: 12px;
   z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.maplegend {
   display: flex;
   align-items: center;
   gap: 3px;
   padding: 6px 8px;
   background: color-mix(in srgb, var(--card) 92%, transparent);
   border: 1px solid var(--rule);
+}
+
+/* Same body as the legend, so the panel reads as one object. */
+.maptoggle,
+.mapramp {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  border: 1px solid var(--rule);
+}
+
+.maptoggle {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.maptoggle:hover { color: var(--ink); border-color: var(--rule-strong); }
+.maptoggle:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+
+/* The swatch is the state: an empty outline off, the ramp's own colour on.
+   No second label to read, and it previews what the fill will look like. */
+.maptoggle-swatch {
+  width: 11px;
+  height: 11px;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+}
+.maptoggle[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.maptoggle[aria-pressed="true"] .maptoggle-swatch {
+  background: linear-gradient(135deg, var(--choro-2), var(--choro-5));
+  border-color: var(--choro-5);
+}
+
+.mapramp .fig { font-family: var(--mono); font-size: 10px; color: var(--ink-soft); }
+.mapramp-bar {
+  width: 92px;
+  height: 8px;
+  border: 1px solid var(--rule);
+  /* Hard stops, not a gradient: the layer draws five discrete quantile bins,
+     so a smooth bar would promise a precision the map does not have. */
+  background: linear-gradient(
+    to right,
+    var(--choro-1) 0 20%, var(--choro-2) 20% 40%, var(--choro-3) 40% 60%,
+    var(--choro-4) 60% 80%, var(--choro-5) 80% 100%
+  );
+}
+
+/* Hover readout, top-left: a dimension callout, not a tooltip -- it stays in
+   one place so the eye does not have to chase it around the map. */
+.mapreadout {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 3;
+  padding: 5px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  border: 1px solid var(--rule-strong);
+  pointer-events: none;
 }
 .maplegend-title {
   font-family: var(--mono);

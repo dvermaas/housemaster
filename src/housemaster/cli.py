@@ -112,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch.add_argument("--no-detail", action="store_true", help="skip detail pages")
     fetch.add_argument(
+        "--no-boundaries",
+        action="store_true",
+        help="skip neighbourhood outlines (drains to nothing after one run)",
+    )
+    fetch.add_argument(
         "--pace",
         type=float,
         default=DEFAULT_PACE,
@@ -152,6 +157,7 @@ def run_fetch(args: argparse.Namespace) -> int:
         max_pages=args.max_pages,
         max_details=args.max_details,
         with_detail=not args.no_detail,
+        with_boundaries=not args.no_boundaries,
         pace=args.pace,
     )
 

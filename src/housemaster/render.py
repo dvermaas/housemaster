@@ -129,7 +129,8 @@ def render_fetch_report(report: FetchReport, counts: dict[str, int]) -> str:
     lines += [
         f"pages {report.pages_read}  |  {report.seen} listings seen  |  "
         + "  |  ".join(changes),
-        f"details fetched {report.details_fetched}",
+        f"details fetched {report.details_fetched}  |  "
+        f"outlines fetched {report.boundaries_fetched}",
         "",
         f"cache: {counts['active']} active of {counts['total']} listings, "
         f"{counts['enriched']} enriched",
@@ -144,6 +145,7 @@ def render_status(db_path: str, counts: dict[str, int], run: object | None) -> s
         f"database   {db_path}",
         f"listings   {counts['active']} active, {counts['total']} total",
         f"enriched   {counts['enriched']} with detail pages",
+        f"outlines   {counts['boundaries']} buurt boundaries",
     ]
     if run is None:
         lines.append("last run   never -- run `housemaster fetch` to populate the cache")

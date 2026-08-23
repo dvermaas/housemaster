@@ -45,7 +45,7 @@ uv run housemaster fetch --max-pages 2 --max-details 5
 
 ```bash
 housemaster fetch [--url URL] [--db PATH] [--max-pages N] [--max-details N]
-                  [--no-detail] [--pace 0.4] [--quiet]
+                  [--no-detail] [--no-boundaries] [--pace 0.4] [--quiet]
 housemaster serve [--db PATH] [--host 127.0.0.1] [--port 8765] [--debug]
 housemaster status [--db PATH]      # what the cache holds, and the last run
 housemaster search [...]            # live, no database -- the original probe
@@ -66,15 +66,18 @@ to keep beside it.
 2. Fetches a detail page **only for houses it has never enriched**, adding the
    description, all nine kenmerken groups, coordinates and neighbourhood stats.
 
+3. Fetches the outline of any buurt it does not have one for yet. Boundaries do
+   not move, so this drains to nothing after the first run.
+
 Photo ids arrive free with step 1 and are stored as they come; nothing is
-downloaded. Step 2 is driven by what the *database* lacks, not by what the run
-happened to see, so an interrupted fetch is resumed by simply running it again.
-There is no checkpoint state and no `--resume` flag.
+downloaded. Steps 2 and 3 are driven by what the *database* lacks, not by what
+the run happened to see, so an interrupted fetch is resumed by simply running it
+again. There is no checkpoint state and no `--resume` flag.
 
 ## Development
 
 ```bash
-uv run pytest                                 # 205 tests, offline
+uv run pytest                                 # 231 tests, offline
 uv run ruff check . && uv run ruff format .   # lint + format
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # canary against the live site
 ```
@@ -333,6 +336,31 @@ Two implementation details that are load-bearing:
 
 The map's tiles cannot be vendored the way the fonts are: the OSM tile policy
 forbids pre-downloading them.
+
+### The buurt overlay
+
+**Buurten** at the bottom left draws all 105 Den Haag neighbourhoods as a
+translucent choropleth, shaded by funda's own average asking price per m² for
+that buurt. Hovering one names it and gives its price level; the fill stays
+see-through so streets, water and the house markers all read straight through
+it. The choice is remembered between visits.
+
+It answers the question the €/m² column cannot: *is this house cheap, or is it
+just in a cheap part of town?* Laakkwartier at €3 675/m² and Vogelwijk at
+€6 504/m² are a 1.8× difference in the same city.
+
+Two decisions worth knowing about:
+
+- **The outlines ignore the filter rail.** They are geography, not data —
+  buurten that vanished as you moved a price slider would read as a bug.
+- **The colour steps are quantiles, not an even split of the range.** Buurt
+  prices are strongly right-skewed, so even spacing put 69 of 102 buurten in the
+  bottom two colours and drew as one flat wash. Equal-count bins put about a
+  fifth of the city in each step, which is what makes the map legible at all.
+
+funda hands the outlines over itself: a search scoped to
+`selected_area=den-haag/<buurt>` echoes the resolved area back with its polygon.
+`fetch` collects them once — they never move — and skips the pass thereafter.
 
 ### Themes and the photo viewer
 
