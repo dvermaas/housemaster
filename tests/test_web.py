@@ -13,7 +13,7 @@ import pytest
 from flask.testing import FlaskClient
 
 from housemaster import db
-from housemaster.models import Detail, Feature, StoredPhoto
+from housemaster.models import Detail, Feature
 from housemaster.web import create_app
 
 from .test_models import make_listing
@@ -25,7 +25,6 @@ HX = {"HX-Request": "true"}
 def cache(tmp_path: Path) -> Path:
     """Three houses: one cheap, one large, one under offer with a price drop."""
     db_path = tmp_path / "test.db"
-    media_root = tmp_path / "media"
     conn = db.connect(db_path)
     with conn:
         db.upsert_listing(
@@ -62,30 +61,20 @@ def cache(tmp_path: Path) -> Path:
                 features=(Feature("bouw", "Bouw", 0, "Bouwjaar", "1931-1944"),),
             ),
         )
-    # A price drop on house 3, and one cached photo for house 1.
+    # A price drop on house 3.
     with conn:
         db.upsert_listing(
             conn,
             make_listing(listing_id=3, address="Cederlaan 3", price=275_000),
             now="2026-04-01T00:00:00+00:00",
         )
-        db.record_photo(
-            conn,
-            StoredPhoto(
-                listing_id=1, position=0, width=720, local_path="1/00.jpg", size_bytes=99
-            ),
-        )
     conn.close()
-
-    (media_root / "1").mkdir(parents=True)
-    (media_root / "1" / "00.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 2000)
-    (tmp_path / "secret.txt").write_text("not for the web", encoding="utf-8")
     return db_path
 
 
 @pytest.fixture
 def client(cache: Path) -> Iterator[FlaskClient]:
-    app = create_app(cache, cache.parent / "media")
+    app = create_app(cache)
     app.config["TESTING"] = True
     with app.test_client() as test_client:
         yield test_client
@@ -326,7 +315,7 @@ def test_the_popup_card_renders_a_house(client: FlaskClient) -> None:
     assert "<!doctype" not in page.lower()  # a fragment, not a page
     assert "Aaastraat 1" in page
     assert "€ 260.000" in page
-    assert "/media/1/00.jpg" in page  # uses the cached photo
+    assert "cloud.funda.nl/tiara/a" in page  # hotlinked straight from funda
 
 
 def test_an_unknown_popup_card_is_a_404(client: FlaskClient) -> None:
@@ -364,45 +353,27 @@ def test_an_unknown_house_is_a_404(client: FlaskClient) -> None:
     assert client.get("/house/999999").status_code == 404
 
 
-def test_a_cached_photo_is_served_locally_and_others_hotlink(
-    client: FlaskClient,
-) -> None:
+def test_every_gallery_photo_is_hotlinked(client: FlaskClient) -> None:
+    # Nothing is stored, so every photo on the page is a CDN URL and the app
+    # serves no image bytes of its own.
     page = body(client.get("/house/1"))
-    assert "/media/1/00.jpg" in page  # position 0 was downloaded
-    assert "cloud.funda.nl/tiara/b" in page  # position 1 was not
+    assert "cloud.funda.nl/tiara/a" in page
+    assert "cloud.funda.nl/tiara/b" in page
+    assert "/media/" not in page
 
 
-# --- media -----------------------------------------------------------------
+# --- the app itself --------------------------------------------------------
 
 
-def test_a_relative_media_root_still_serves(
+def test_a_relative_db_path_is_resolved(
     cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Flask resolves a relative static root against its own package directory,
-    # so `serve` run from a project root with `data/media` would 404 silently.
+    # Flask resolves a relative path against its own package directory, so
+    # `serve` run from a project root would look for the cache in the wrong
+    # place entirely.
     monkeypatch.chdir(cache.parent)
-    app = create_app(Path("test.db"), Path("media"))
+    app = create_app(Path("test.db"))
     app.config["TESTING"] = True
-    assert app.config["MEDIA_ROOT"].is_absolute()
+    assert app.config["DB_PATH"].is_absolute()
     with app.test_client() as relative_client:
-        assert relative_client.get("/media/1/00.jpg").status_code == 200
-
-
-def test_a_cached_photo_is_served(client: FlaskClient) -> None:
-    response = client.get("/media/1/00.jpg")
-    assert response.status_code == 200
-    assert response.data.startswith(b"\xff\xd8\xff")
-
-
-def test_a_missing_photo_is_a_404(client: FlaskClient) -> None:
-    assert client.get("/media/1/99.jpg").status_code == 404
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["/media/../secret.txt", "/media/..%2Fsecret.txt", "/media/1/../../secret.txt"],
-)
-def test_path_traversal_is_refused(client: FlaskClient, path: str) -> None:
-    response = client.get(path)
-    assert response.status_code in (404, 400, 308)
-    assert b"not for the web" not in response.data
+        assert relative_client.get("/").status_code == 200

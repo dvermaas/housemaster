@@ -113,7 +113,7 @@ def to_listing(raw: dict[str, Any]) -> Listing:
         agent=(agents[0].get("name", "").strip() if agents else ""),
         url=f"{BASE_URL}{relative_url}" if relative_url else "",
         # Search results carry every photo id, in order -- no detail request is
-        # needed for photos. See media.photo_url for how these become URLs.
+        # needed for photos. See photos.photo_url for how these become URLs.
         photo_ids=tuple(raw.get("photo_image_id") or ()),
     )
 

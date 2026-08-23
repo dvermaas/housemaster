@@ -16,7 +16,7 @@ Working end to end: scrape into a local cache, then browse and filter it.
 - [x] Confirm which HTTP client gets past the bot wall
 - [x] Extract search pages into structured records
 - [x] Extract detail pages (kenmerken, description, coordinates, buurt stats)
-- [x] SQLite cache with dedupe, price/status history and photo caching
+- [x] SQLite cache with dedupe and price/status history
 - [x] Web UI with filtering
 - [x] Map view, filtered live
 - [x] Light/dark themes and a full-screen photo viewer
@@ -31,21 +31,21 @@ uv run housemaster fetch            # scrape the target search into ./data
 uv run housemaster serve            # browse it at http://127.0.0.1:8765
 ```
 
-The first `fetch` takes roughly 15 minutes (35 search pages, ~520 detail pages,
-~2 600 photos, a few hundred MB). Every run after that takes about 30 seconds,
-because detail pages and photos are fetched **once per house, ever**. To try it
+The first `fetch` takes a few minutes (35 search pages plus ~520 detail pages)
+and leaves a cache of a couple of megabytes. Every run after that takes about
+30 seconds, because a detail page is fetched **once per house, ever**. Photos
+are never fetched at all — they are hotlinked from funda's CDN. To try it
 without the wait:
 
 ```bash
-uv run housemaster fetch --max-pages 2 --max-details 5 --photos-per-house 2
+uv run housemaster fetch --max-pages 2 --max-details 5
 ```
 
 ### Commands
 
 ```bash
 housemaster fetch [--url URL] [--db PATH] [--max-pages N] [--max-details N]
-                  [--photos-per-house 5] [--photo-width 720]
-                  [--no-detail] [--no-photos] [--pace 0.4] [--quiet]
+                  [--no-detail] [--pace 0.4] [--quiet]
 housemaster serve [--db PATH] [--host 127.0.0.1] [--port 8765] [--debug]
 housemaster status [--db PATH]      # what the cache holds, and the last run
 housemaster search [...]            # live, no database -- the original probe
@@ -54,8 +54,9 @@ housemaster search [...]            # live, no database -- the original probe
 `search` is unchanged and still hits funda directly, printing text, JSON or CSV.
 It is the quick way to check the extraction path without touching the cache.
 
-Data lives in `./data/` (`housemaster.db` plus `media/`), overridable with
-`--db` or `$HOUSEMASTER_DB`; the media store always sits beside the database.
+Data lives in `./data/housemaster.db`, overridable with `--db` or
+`$HOUSEMASTER_DB`. That one file is the whole cache — there is no media store
+to keep beside it.
 
 ### What `fetch` does
 
@@ -64,16 +65,16 @@ Data lives in `./data/` (`housemaster.db` plus `media/`), overridable with
    so price drops and "under offer" transitions become visible.
 2. Fetches a detail page **only for houses it has never enriched**, adding the
    description, all nine kenmerken groups, coordinates and neighbourhood stats.
-3. Downloads the first N photos of each house that lacks them.
 
-Steps 2 and 3 are driven by what the *database* lacks, not by what the run
+Photo ids arrive free with step 1 and are stored as they come; nothing is
+downloaded. Step 2 is driven by what the *database* lacks, not by what the run
 happened to see, so an interrupted fetch is resumed by simply running it again.
 There is no checkpoint state and no `--resume` flag.
 
 ## Development
 
 ```bash
-uv run pytest                                 # 226 tests, offline
+uv run pytest                                 # 205 tests, offline
 uv run ruff check . && uv run ruff format .   # lint + format
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # canary against the live site
 ```
@@ -229,18 +230,32 @@ https://cloud.funda.nl/{photo_image_id}?options=width={W}
 Widths round **up** to a fixed ladder — 228, 464, 720, 1080, 1440, and the
 2160px master when `?options` is omitted. At width 720 a photo is 30–60 KB.
 
-Three traps, each of which silently produces garbage rather than an error:
+**Photos are hotlinked, never downloaded.** The browser requests them straight
+from funda, which is why `photos.py` is thirty lines with no imports: it builds
+a URL and that is all.
 
-1. `Vary: accept` — curl_cffi's Chrome impersonation sends Chrome's own Accept
-   header, so without an override you get **AVIF bytes in a `.jpg` file**.
-   `media.py` asks for JPEG explicitly and then checks the magic bytes.
-2. **TLS impersonation is required for the CDN too** — plain requests get 403.
-3. A 404 comes back as `text/plain`, so the status code alone proves nothing.
+This was a deliberate reversal. An earlier version cached the first five photos
+of every house to disk, and the case for it was archival — being able to look
+back at a house that had since sold. What it actually cost was the largest part
+of a first run (~2 600 requests), 40 MB of disk, and a whole class of bugs that
+only exist when *we* are the HTTP client:
 
-Funda also genuinely serves some images as **PNG**, so the downloader keys the
-file extension off the real magic bytes rather than assuming JPEG. URLs are
-content-addressed and immutable (conditional requests never return 304), so a
-cached photo is never revalidated — only skipped.
+- `Vary: accept` — curl_cffi's Chrome impersonation sends Chrome's own Accept
+  header, so without an override you get **AVIF bytes in a `.jpg` file**.
+- **TLS impersonation is required for the CDN too** — plain requests get 403.
+- A 404 comes back as `text/plain`, so the status code alone proves nothing,
+  and funda genuinely mixes **PNG** in among the JPEGs, so the file extension
+  had to be derived from magic bytes rather than assumed.
+
+A browser negotiates content correctly on its own, so hotlinking deletes all
+four problems at once. The URLs are content-addressed and immutable
+(`Cache-Control: max-age=31536000, immutable`), so the browser caches them for a
+year and the second visit is free.
+
+What it gives up is the archive: if funda ever garbage-collects media for a
+sold listing, that house's photos are gone. Whether it does is
+[still untested](FINDINGS.md). The ids are still stored, so nothing stops a
+future archival pass from being added back for the houses that matter.
 
 ## Project layout
 
@@ -254,11 +269,11 @@ src/housemaster/
   net.py         the one place an HTTP request is made (TLS impersonation)
   funda.py       search + detail extraction, with bot-wall detection
   db.py          SQLite cache: schema, migrations, upserts, queries
-  media.py       photo URLs, download, validation, atomic writes
+  photos.py      CDN photo URLs -- a pure builder, importing nothing
   pipeline.py    the fetch orchestration -- the only network+database module
   render.py      text / json / csv output
   cli.py         argparse entry point -> `housemaster`
-  web/           Flask app: views, filters, templates, map.js, vendored assets
+  web/           Flask app: views, filters, templates, map.js, fonts
 tests/           offline unit tests + one opt-in network canary
 ```
 
@@ -269,8 +284,23 @@ single module allowed to touch both the network and the database.
 
 ## The web UI
 
-Flask + Jinja + htmx. No build step, no bundler, no JavaScript framework; htmx
-and both webfonts are vendored into `web/static/`, so the app works offline.
+Flask + Jinja + htmx. No build step, no bundler, no JavaScript framework.
+
+htmx and MapLibre load from **jsDelivr, pinned by exact version and by
+Subresource Integrity**. The browser hashes each file as it arrives and refuses
+to execute it unless the digest matches, so a compromised CDN cannot quietly
+swap in different code — the hashes in `base.html` were computed from the exact
+bytes that used to be vendored in the repository. Version and hash are one
+fact: never bump one without recomputing the other.
+
+```bash
+curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+```
+
+The two webfonts stay vendored in `web/static/fonts/`. SRI does not cover
+`@font-face`, so a CDN font would be the one unverifiable request on the page,
+and glyph data is not executable anyway. Our own CSS and JS are served locally
+for the same reason there is no build step: they are the app.
 
 The filter rail GETs back to `/`, which returns the results fragment when htmx
 asks for it and the full page otherwise. That keeps the pushed URL shareable —
@@ -282,7 +312,7 @@ bare fragment. Without JavaScript the same form still works as a plain GET.
 The **Map** toggle beside the sort control swaps the card grid for a map of the
 same filtered set — the filter rail stays put, so narrowing the price range
 makes markers disappear in place. Markers are coloured by the NEN energy scale;
-clicking one opens a card with the cached photo, address, price and €/m².
+clicking one opens a card with the photo, address, price and €/m².
 
 Basemap tiles come from [OpenFreeMap](https://openfreemap.org/) — **no API key,
 no account, no usage limits**, attribution rendered automatically. Google and
@@ -301,9 +331,8 @@ Two implementation details that are load-bearing:
   form serialises everything it contains, and it is reserialised on every swap;
   without it, changing a filter on the map silently drops you back to the grid.
 
-The map is the **one part of the app that needs a network connection** — the
-OSM tile policy forbids pre-downloading tiles, so they cannot be vendored the
-way htmx and the fonts are.
+The map's tiles cannot be vendored the way the fonts are: the OSM tile policy
+forbids pre-downloading them.
 
 ### Themes and the photo viewer
 
@@ -336,7 +365,7 @@ The runtime surface is deliberately two packages. An AST scan of every import in
 | Dependency | Role |
 | --- | --- |
 | `curl_cffi` | TLS-impersonating HTTP — **one import, in `net.py`**, and the whole pipeline runs through it |
-| `flask` | the `serve` web app (Jinja comes with it; htmx and fonts are vendored) |
+| `flask` | the `serve` web app (Jinja comes with it; htmx and MapLibre come from a CDN, pinned by SRI) |
 | `pytest` (dev) | test runner; strict markers/config, offline by default |
 | `ruff` (dev) | lint + format; rules configured in `pyproject.toml` |
 

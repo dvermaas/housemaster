@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from housemaster import __version__, db, media
+from housemaster import __version__, db
 from housemaster.funda import (
     DEFAULT_SEARCH_URL,
     PAGE_SIZE,
@@ -16,11 +16,7 @@ from housemaster.funda import (
     fetch_search_page,
     iter_all_listings,
 )
-from housemaster.pipeline import (
-    DEFAULT_PACE,
-    DEFAULT_PHOTOS_PER_LISTING,
-    FetchOptions,
-)
+from housemaster.pipeline import DEFAULT_PACE, FetchOptions
 from housemaster.pipeline import run_fetch as run_pipeline
 from housemaster.render import (
     render_csv,
@@ -114,22 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="fetch at most N detail pages, to slice a long first run",
     )
-    fetch.add_argument(
-        "--photos-per-house",
-        type=int,
-        default=DEFAULT_PHOTOS_PER_LISTING,
-        metavar="N",
-        help="photos to cache per house (default: %(default)s; 0 disables)",
-    )
-    fetch.add_argument(
-        "--photo-width",
-        type=int,
-        default=media.DEFAULT_WIDTH,
-        metavar="PX",
-        help=f"CDN width, rounded up to one of {media.WIDTHS} (default: %(default)s)",
-    )
     fetch.add_argument("--no-detail", action="store_true", help="skip detail pages")
-    fetch.add_argument("--no-photos", action="store_true", help="skip photo downloads")
     fetch.add_argument(
         "--pace",
         type=float,
@@ -164,22 +145,13 @@ def _db_path(args: argparse.Namespace) -> Path:
     return Path(args.db or os.environ.get("HOUSEMASTER_DB") or db.DEFAULT_DB_PATH)
 
 
-def _media_root(db_path: Path) -> Path:
-    """Beside the database: a cache without its images is not much use, so one
-    path should move both."""
-    return db_path.parent / "media"
-
-
 def run_fetch(args: argparse.Namespace) -> int:
     path = _db_path(args)
     options = FetchOptions(
         search_url=args.url,
         max_pages=args.max_pages,
         max_details=args.max_details,
-        photos_per_listing=args.photos_per_house,
-        photo_width=args.photo_width,
         with_detail=not args.no_detail,
-        with_photos=not args.no_photos,
         pace=args.pace,
     )
 
@@ -190,10 +162,7 @@ def run_fetch(args: argparse.Namespace) -> int:
     conn = db.connect(path)
     try:
         report = run_pipeline(
-            conn,
-            _media_root(path),
-            options,
-            progress=_noop_progress if args.quiet else progress,
+            conn, options, progress=_noop_progress if args.quiet else progress
         )
         print(render_fetch_report(report, db.counts(conn)))
     finally:
@@ -230,7 +199,7 @@ def run_serve(args: argparse.Namespace) -> int:
     # Imported here so `search` and `fetch` never pay Flask's import cost.
     from housemaster.web import create_app  # noqa: PLC0415
 
-    app = create_app(path, _media_root(path))
+    app = create_app(path)
     print(f"HouseMaster on http://{args.host}:{args.port}", file=sys.stderr)
     app.run(host=args.host, port=args.port, debug=args.debug)
     return EXIT_OK

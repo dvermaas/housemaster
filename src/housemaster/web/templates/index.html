@@ -4,7 +4,6 @@
 {% block masthead %}
   <span class="meta">
     <span>{{ counts.active }} cached</span>
-    <span>{{ counts.photos }} photos</span>
     {% if last_run %}<span>updated {{ last_run.started_at | since }}</span>{% endif %}
   </span>
 {% endblock %}

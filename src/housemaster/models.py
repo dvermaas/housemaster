@@ -94,17 +94,6 @@ class Detail:
     features: tuple[Feature, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class StoredPhoto:
-    """One photo that made it to disk."""
-
-    listing_id: int
-    position: int
-    width: int
-    local_path: str
-    size_bytes: int
-
-
 @dataclass(slots=True)
 class FetchReport:
     """Counts for one `fetch` run. Mutable: the pipeline accumulates into it."""
@@ -117,7 +106,6 @@ class FetchReport:
     status_changes: int = 0
     delisted: int = 0
     details_fetched: int = 0
-    photos_downloaded: int = 0
     complete: bool = False
     """True only when every search page was read. Gates delisted-marking."""
     error: str | None = None

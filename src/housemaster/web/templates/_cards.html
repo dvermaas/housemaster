@@ -3,12 +3,12 @@
   <article class="card">
     <a href="{{ url_for('browse.house', listing_id=house.listing_id) }}">
       <div class="shot">
-        {% if house.thumb %}
-          <img src="{{ url_for('browse.media_file', filename=house.thumb) }}"
-               alt="{{ house.address }}" loading="lazy" decoding="async">
-        {% elif house.first_image %}
+        {% if house.first_image %}
+          {# Straight from funda's CDN. The ids are content-addressed and
+             immutable, so the browser caches them for a year. #}
           <img src="{{ photo_url(house.first_image, 464) }}"
-               alt="{{ house.address }}" loading="lazy" decoding="async">
+               alt="{{ house.address }}" loading="lazy" decoding="async"
+               referrerpolicy="no-referrer">
         {% else %}
           <div class="missing">no photo</div>
         {% endif %}

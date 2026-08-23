@@ -17,12 +17,32 @@
       }
     } catch (e) { /* private mode: fall back to the system preference */ }
   </script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/maplibre-gl.css') }}">
+  {#
+    htmx and MapLibre come from jsDelivr, pinned by exact version *and* by
+    Subresource Integrity: the browser hashes what arrives and refuses to run
+    it unless the digest matches, so a compromised CDN cannot quietly hand us
+    different code. Version and hash are one fact -- never bump one without
+    recomputing the other:
+
+        curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+
+    Our own CSS and JS stay local. So do the two webfonts: SRI does not cover
+    @font-face, so a CDN font would be the one unverifiable request on the
+    page, and glyph data is not executable anyway.
+  #}
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css"
+        integrity="sha384-Nq6PQ+9vJPvw7U/VfDELyrWoGQMsy0gi6QShhaSrGzkpF5KkM40csg2leky+YMTd"
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+  {# After MapLibre's, so our tokens win where the two overlap. #}
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
-  {# Vendored, not a CDN: this is a local tool that must work offline. The map
-     is the one exception -- its tiles have to come from the network. #}
-  <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
-  <script src="{{ url_for('static', filename='vendor/maplibre-gl.js') }}" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js"
+          integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
+          crossorigin="anonymous" referrerpolicy="no-referrer" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"
+          integrity="sha384-GfxBM9x46BaAFxtCq39Fxir8fNZ4VDnwgfi6Kzi5/F1tAFsm0amuuV8kd+Pxzuf/"
+          crossorigin="anonymous" referrerpolicy="no-referrer" defer></script>
   <script src="{{ url_for('static', filename='theme.js') }}" defer></script>
   <script src="{{ url_for('static', filename='map.js') }}" defer></script>
   <script src="{{ url_for('static', filename='lightbox.js') }}" defer></script>

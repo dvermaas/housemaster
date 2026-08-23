@@ -1,4 +1,4 @@
-"""The `fetch` orchestration: funda -> database -> disk.
+"""The `fetch` orchestration: funda -> database.
 
 The only module that touches both the network and the cache. It never prints --
 callers pass a `progress` callback, which keeps output formatting in `render`
@@ -6,8 +6,8 @@ and printing in `cli`.
 
 The design property worth preserving: **every queue is a SQL predicate over
 stored state**, never a set built in memory during the run. `detail_fetched_at
-IS NULL` and `local_path IS NULL` mean an interrupted run is resumed by simply
-running `fetch` again -- there is no checkpoint state and no `--resume` flag.
+IS NULL` means an interrupted run is resumed by simply running `fetch` again --
+there is no checkpoint state and no `--resume` flag.
 """
 
 from __future__ import annotations
@@ -16,9 +16,8 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
-from housemaster import db, media
+from housemaster import db
 from housemaster.funda import (
     DEFAULT_SEARCH_URL,
     BlockedError,
@@ -32,8 +31,6 @@ Progress = Callable[[str], None]
 
 DEFAULT_PACE = 0.4
 """Seconds between funda page requests. ~1.4 req/s including latency."""
-PHOTO_PACE = 0.15
-DEFAULT_PHOTOS_PER_LISTING = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +40,7 @@ class FetchOptions:
     search_url: str = DEFAULT_SEARCH_URL
     max_pages: int | None = None
     max_details: int | None = None
-    photos_per_listing: int = DEFAULT_PHOTOS_PER_LISTING
-    photo_width: int = media.DEFAULT_WIDTH
     with_detail: bool = True
-    with_photos: bool = True
     pace: float = DEFAULT_PACE
 
 
@@ -56,7 +50,6 @@ def _noop(_message: str) -> None:
 
 def run_fetch(
     conn: sqlite3.Connection,
-    media_root: Path,
     options: FetchOptions | None = None,
     *,
     progress: Progress = _noop,
@@ -87,8 +80,6 @@ def run_fetch(
 
     if options.with_detail:
         _enrich(conn, options, report, progress)
-    if options.with_photos and options.photos_per_listing > 0:
-        _download(conn, media_root, options, report, progress)
 
     db.finish_run(conn, run_id, report)
     return report
@@ -167,40 +158,3 @@ def _enrich(
         if index % 25 == 0:
             progress(f"  {index}/{len(pending)} details")
         time.sleep(options.pace)
-
-
-def _download(
-    conn: sqlite3.Connection,
-    media_root: Path,
-    options: FetchOptions,
-    report: FetchReport,
-    progress: Progress,
-) -> None:
-    """Cache the first N photos of each listing that lacks them."""
-    pending = db.photos_needing_download(conn, options.photos_per_listing)
-    if not pending:
-        return
-    progress(f"downloading {len(pending)} photos")
-
-    failures = 0
-    for index, row in enumerate(pending, start=1):
-        result = media.download_photo(
-            media_root,
-            media.PhotoRequest(row["listing_id"], row["position"], row["image_id"]),
-            width=options.photo_width,
-        )
-        with conn:
-            if result.photo is not None:
-                db.record_photo(conn, result.photo)
-                report.photos_downloaded += 1
-            else:
-                failures += 1
-                db.record_photo_failure(
-                    conn, row["listing_id"], row["position"], result.error or "unknown"
-                )
-        if index % 100 == 0:
-            progress(f"  {index}/{len(pending)} photos")
-        time.sleep(PHOTO_PACE)
-
-    if failures:
-        progress(f"  {failures} photos failed (retried on the next run)")

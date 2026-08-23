@@ -21,8 +21,8 @@ uv sync                                # install/refresh .venv; installs the pac
 uv add <pkg>                           # runtime dependency
 uv add --dev <pkg>                     # dev dependency (goes to [dependency-groups].dev)
 
-uv run housemaster fetch               # scrape into ./data (first run ~15 min)
-uv run housemaster fetch --max-pages 2 --max-details 5 --photos-per-house 2
+uv run housemaster fetch               # scrape into ./data (first run ~4 min)
+uv run housemaster fetch --max-pages 2 --max-details 5
 uv run housemaster serve               # web UI on http://127.0.0.1:8765
 uv run housemaster status              # what the cache holds
 uv run housemaster search              # live, no database -- the original probe
@@ -62,22 +62,22 @@ Src layout, hatchling build, `housemaster` console script via `[project.scripts]
 
 ```
 devalue  <- funda
-net      <- funda, media          the one place an HTTP request is made
+net      <- funda                 the one place an HTTP request is made
 models   <- everything
 funda    <- pipeline
 db       <- pipeline, web, cli    no HTTP, no funda imports
-media    <- pipeline
+photos   <- web                   imports nothing at all; a URL builder
 pipeline <- cli                   the ONLY network + database module
 render   <- cli, web (as filters)
 web      <- cli                   never fetches
 ```
 
 - `devalue.py` — decoder for Nuxt's devalue format: a *flat array* where integers **inside a container** are references into that same array (an integer in the slot a reference lands on is a literal, not a further hop), and a list whose first element is a string is a tagged value. Handles cycles and the `Ref`/`Reactive` wrappers. Knows nothing about funda.
-- `models.py` — frozen `Listing` / `Detail` / `Feature` / `SearchPage` / `StoredPhoto`, plus the mutable `FetchReport`. `PAGE_SIZE = 15`.
-- `net.py` — `get_text` / `get_bytes`. Every request impersonates Chrome here, so that guarantee is testable in one place.
+- `models.py` — frozen `Listing` / `Detail` / `Feature` / `SearchPage`, plus the mutable `FetchReport`. `PAGE_SIZE = 15`.
+- `net.py` — `get_text`, and nothing else. Every request impersonates Chrome here, so that guarantee is testable in one place.
 - `funda.py` — all funda knowledge: `fetch_html`, `extract_state`, `to_listing`, `to_detail`, `fetch_search_page`, `fetch_detail`. Knows nothing about storage or output.
 - `db.py` — schema, `MIGRATIONS`, upserts, `Filters` + `query_listings`. Pure SQLite.
-- `media.py` — `photo_url`, `download_photo`, format detection. Takes an injectable `fetch` callable, which is the whole testing story for it.
+- `photos.py` — `photo_url` and the CDN width ladder. **Zero imports**, pinned by a test: the web app depends on it, so it must stay unable to reach anything.
 - `pipeline.py` — `run_fetch`. Never prints; takes a `progress` callback.
 - `render.py`, `cli.py`, `web/` — output formatting, entry point, Flask app.
 
@@ -104,18 +104,31 @@ Passing the wall depends only on the TLS/JA3 fingerprint, so every request must 
 
 The `photo_image_id` in every search result is already a complete CDN path, so photos need **no detail request**: `https://cloud.funda.nl/{photo_image_id}?options=width={W}`. Widths round *up* to 228/464/720/1080/1440, or the 2160 master with no `?options`.
 
-- `Vary: accept` — curl_cffi's Chrome impersonation sends Chrome's Accept header, so without an explicit `Accept: image/jpeg,*/*` the CDN returns **AVIF bytes into a `.jpg`**, silently. `media.ACCEPT` handles it; `media.validate` checks the magic bytes as a backstop.
-- Funda genuinely serves some images as **PNG**. The file extension comes from `detect_format(body)`, never from an assumption.
-- URLs are content-addressed and immutable, and conditional requests never return 304 — so a cached photo is skipped, never revalidated.
-- Downloads write a `.part` then `Path.replace`, so a killed run cannot leave a truncated file that later looks cached.
+**Photos are hotlinked, never downloaded — do not add a download path back without a reason that survives the argument below.** The pipeline used to cache five photos per house; migration 002 dropped the columns that described a file on disk. Removing it deleted the longest part of a first run (~2 600 requests), 40 MB of disk, and every bug in this list, because a browser negotiates content correctly on its own where a scripted client does not:
+
+- `Vary: accept` — curl_cffi's Chrome impersonation sends Chrome's Accept header, so without an explicit `Accept: image/jpeg,*/*` the CDN returned **AVIF bytes into a `.jpg`**, silently.
+- Funda genuinely serves some images as **PNG**, so a file extension could never be assumed.
+- The CDN answers 403 without TLS impersonation, and reports a 404 as `text/plain`.
+
+What is given up is the archive, if funda ever garbage-collects media for a sold listing — untested, and recorded as an open question in `FINDINGS.md`. The image ids are still stored, so an archival pass could be added back later for the houses that matter.
+
+The templates ask for 464 on cards and 720/1440 on the detail page, and set `referrerpolicy="no-referrer"` — verified in a real browser to load fine.
 
 ## The web app
 
-Flask + Jinja + htmx, no build step. htmx and both woff2 fonts are vendored into `web/static/`, so it works offline.
+Flask + Jinja + htmx, no build step.
+
+**htmx and MapLibre load from jsDelivr, pinned by version *and* SRI hash** (`base.html`). The browser refuses to execute a file whose digest does not match, so a compromised CDN cannot swap in different code. The hashes were computed from the exact bytes previously vendored here. **Version and hash are one fact — never bump one without recomputing the other:**
+
+```bash
+curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+```
+
+Both woff2 fonts stay vendored in `web/static/fonts/`: SRI does not cover `@font-face`, so a CDN font would be the one unverifiable request on the page, and glyph data is not executable. Our own CSS and JS stay local too.
 
 - `/` returns the **full page** normally and the `_results.html` **fragment** when `HX-Request` is set — except on `HX-History-Restore-Request`, which must get the full page or the back button lands on a bare fragment. This is why there is no separate `/partials/...` route: `hx-push-url` would otherwise push a URL that renders a fragment on reload.
 - **htmx attributes inherit down the DOM.** The load-more sentinel sits inside the filter form, so it must explicitly override `hx-target`, `hx-select`, `hx-swap` and `hx-push-url` — without them it adopts the form's `#results` target, swaps nothing, and navigates the address bar to `/more`. A test pins this.
-- `create_app` resolves both paths to absolute: `send_from_directory` resolves a *relative* root against the Flask package directory, not the cwd, so a relative media root silently 404s every photo.
+- `create_app` resolves the database path to absolute: Flask resolves a *relative* path against the package directory, not the cwd, so `data/housemaster.db` would be looked for in the wrong place entirely.
 - The connection is per-request via `flask.g`, opened read-only. WAL lets `serve` read while `fetch` writes.
 - Design direction is "Plattegrond" (architectural drafting; mono tabular figures; the real Dutch NEN energy colours). Tokens live at the top of `web/static/app.css`.
 - **Light and dark are two halves of one idea**, not an inverted palette: a real blueprint is light lines on dark ground, so light mode is drafting vellum and dark mode is cyanotype. Three states — an explicit choice sets `data-theme` on `<html>` and wins; no attribute means the CSS follows `prefers-color-scheme`. An inline script in `<head>` applies a stored choice **before first paint**, or the wrong theme flashes. `--basemap` is a CSS token so the light/dark map style mapping lives in the stylesheet, not in JS.
@@ -171,6 +184,6 @@ Practical notes when driving the browser:
 
 - Optional CloakBrowser extras are **not** installed: `geoip2`, `aiohttp`, `websockets`. `geoip=True` needs `uv add geoip2` plus a DB download first.
 - `mcp__claude-in-chrome__*` may also be available; it drives the user's real Chrome and is not stealth — prefer the cloakbrowser server for funda.
-- One request yields 15 fully-detailed listings, so the full Den Haag sweep is ~35 requests. Pace them (`pipeline.DEFAULT_PACE`), and remember detail pages and photos are fetched once per house ever.
+- One request yields 15 fully-detailed listings, so the full Den Haag sweep is ~35 requests. Pace them (`pipeline.DEFAULT_PACE`), and remember a detail page is fetched once per house ever. Photos cost no requests at all.
 - Windows consoles default to cp1252 and mangle `€`/`m²`/Dutch names. `cli._use_utf8_output()` reconfigures the streams; any new entry point needs the same.
 - Ruff enables `T20` (no stray `print`) everywhere except `cli.py`. Library code returns data or calls a `progress` callback; the CLI prints. Keep it that way rather than widening the ignore.

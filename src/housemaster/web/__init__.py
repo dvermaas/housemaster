@@ -3,6 +3,9 @@
 Read-only by construction -- it opens the database read-only and never imports
 funda's fetching functions, so a page view can never hit the network. WAL means
 it keeps working while a `fetch` writes underneath it.
+
+Photos are hotlinked straight from funda's CDN, so the app serves no binary
+assets of its own and has no media directory to be pointed at.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from pathlib import Path
 
 from flask import Flask, current_app, g
 
-from housemaster import db, media
+from housemaster import db, photos
 from housemaster.render import euro
 from housemaster.web import filters, views
 
@@ -31,20 +34,19 @@ def close_conn(_exception: BaseException | None = None) -> None:
         conn.close()
 
 
-def create_app(db_path: Path, media_root: Path) -> Flask:
+def create_app(db_path: Path) -> Flask:
     """Build the app. A factory so tests can bind it to a temporary cache."""
     app = Flask(__name__)
-    # Absolute, both of them: Flask resolves a relative send_from_directory root
-    # against the *package* directory, not the working directory, so a plain
-    # `data/media` would silently 404 every cached photo.
+    # Resolved: Flask resolves a relative path against the *package* directory,
+    # not the working directory, so `data/housemaster.db` would look in the
+    # wrong place entirely.
     app.config["DB_PATH"] = Path(db_path).resolve()
-    app.config["MEDIA_ROOT"] = Path(media_root).resolve()
 
     app.jinja_env.filters["euro"] = euro  # the CLI's formatter, so they agree
     app.jinja_env.filters["energy_class"] = filters.energy_class
     app.jinja_env.filters["compact"] = filters.compact
     app.jinja_env.filters["since"] = filters.since
-    app.jinja_env.globals["photo_url"] = media.photo_url
+    app.jinja_env.globals["photo_url"] = photos.photo_url
 
     app.teardown_appcontext(close_conn)
     app.register_blueprint(views.bp)

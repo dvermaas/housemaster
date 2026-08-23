@@ -6,7 +6,7 @@ __pycache__/
 dist/
 build/
 
-# The cache: SQLite (three files under WAL) plus the media store
+# The cache: SQLite, three files under WAL. Photos are hotlinked, not stored.
 data/
 
 # Tooling caches

@@ -88,30 +88,26 @@ def funda(monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
     return FakeFunda([[1, 2], [3, 4]]).install(monkeypatch)
 
 
-def run(conn: sqlite3.Connection, tmp_path: Path, **kwargs: object) -> object:
-    options = pipeline.FetchOptions(
-        search_url="https://example.test/zoeken", with_photos=False, **kwargs
-    )
-    return pipeline.run_fetch(conn, tmp_path / "media", options)
+def run(conn: sqlite3.Connection, **kwargs: object) -> object:
+    options = pipeline.FetchOptions(search_url="https://example.test/zoeken", **kwargs)
+    return pipeline.run_fetch(conn, options)
 
 
 # --- the sweep -------------------------------------------------------------
 
 
 def test_a_first_run_stores_every_listing(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
-    report = run(conn, tmp_path)
+    report = run(conn)
     assert report.new_listings == 4
     assert report.seen == 4
     assert report.complete
     assert db.counts(conn)["total"] == 4
 
 
-def test_max_pages_stops_the_sweep(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
-) -> None:
-    run(conn, tmp_path, max_pages=1)
+def test_max_pages_stops_the_sweep(conn: sqlite3.Connection, funda: FakeFunda) -> None:
+    run(conn, max_pages=1)
     assert funda.page_calls == [1]
     assert db.counts(conn)["total"] == 2
 
@@ -120,13 +116,13 @@ def test_max_pages_stops_the_sweep(
 
 
 def test_a_second_run_fetches_no_detail_pages(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
-    run(conn, tmp_path)
+    run(conn)
     assert len(funda.detail_calls) == 4
     funda.detail_calls.clear()
 
-    report = run(conn, tmp_path)
+    report = run(conn)
     # The whole point of the cache: detail is paid for once per house.
     assert funda.detail_calls == []
     assert report.new_listings == 0
@@ -134,35 +130,33 @@ def test_a_second_run_fetches_no_detail_pages(
 
 
 def test_running_twice_does_not_duplicate_anything(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
-    run(conn, tmp_path)
+    run(conn)
     before = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
-    run(conn, tmp_path)
+    run(conn)
     assert conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0] == before
     assert db.counts(conn)["total"] == 4
     assert len(db.get_features(conn, 1)) == 1
 
 
 def test_a_price_drop_is_picked_up_without_a_detail_request(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
-    run(conn, tmp_path)
+    run(conn)
     funda.detail_calls.clear()
     funda.prices[1] = 275_000
 
-    report = run(conn, tmp_path)
+    report = run(conn)
     assert report.price_changes == 1
     assert funda.detail_calls == []  # price comes from the search page we already load
     assert [row["price"] for row in db.get_price_history(conn, 1)] == [300_000, 275_000]
 
 
-def test_a_status_change_is_picked_up(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
-) -> None:
-    run(conn, tmp_path)
+def test_a_status_change_is_picked_up(conn: sqlite3.Connection, funda: FakeFunda) -> None:
+    run(conn)
     funda.statuses[2] = "under_bid"
-    report = run(conn, tmp_path)
+    report = run(conn)
     assert report.status_changes == 1
     assert db.get_listing(conn, 2)["status"] == "under_bid"
 
@@ -171,23 +165,23 @@ def test_a_status_change_is_picked_up(
 
 
 def test_an_interrupted_detail_pass_is_picked_up_next_run(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
     # The queue is "what the database lacks", not "what this run saw", so a run
     # that dies between the sweep and its details loses nothing.
-    run(conn, tmp_path, max_details=1)
+    run(conn, max_details=1)
     assert len(db.listings_needing_detail(conn)) == 3
 
-    run(conn, tmp_path)
+    run(conn)
     assert db.listings_needing_detail(conn) == []
     assert db.counts(conn)["enriched"] == 4
 
 
 def test_one_unparseable_listing_does_not_abort_the_run(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
     funda.detail_error = PayloadError("unexpected detail state shape")
-    report = run(conn, tmp_path)
+    report = run(conn)
     assert report.details_fetched == 0
     assert len(funda.detail_calls) == 4  # it kept going through all four
     # Nothing was marked enriched, so they stay queued for the next run.
@@ -198,15 +192,15 @@ def test_one_unparseable_listing_does_not_abort_the_run(
 
 
 def test_a_block_midway_keeps_earlier_pages_and_delists_nothing(
-    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # This is the dangerous case: naive logic would mark every listing on the
     # unread pages as gone.
     FakeFunda([[1, 2], [3, 4], [5, 6]]).install(monkeypatch)
-    run(conn, tmp_path)
+    run(conn)
 
     FakeFunda([[1, 2], [3, 4], [5, 6]], block_on_page=2).install(monkeypatch)
-    report = run(conn, tmp_path)
+    report = run(conn)
 
     assert report.error is not None
     assert not report.complete
@@ -220,37 +214,37 @@ def test_a_block_midway_keeps_earlier_pages_and_delists_nothing(
 
 
 def test_a_partial_run_never_marks_anything_delisted(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
+    conn: sqlite3.Connection, funda: FakeFunda
 ) -> None:
-    run(conn, tmp_path)
-    report = run(conn, tmp_path, max_pages=1)
+    run(conn)
+    report = run(conn, max_pages=1)
     assert report.delisted == 0
     assert db.counts(conn)["active"] == 4
 
 
 def test_a_listing_needs_two_complete_absences_to_delist(
-    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     FakeFunda([[1, 2], [3, 4]]).install(monkeypatch)
-    run(conn, tmp_path)
+    run(conn)
 
     FakeFunda([[1, 2], [3]]).install(monkeypatch)  # 4 vanished
-    assert run(conn, tmp_path).delisted == 0  # paging jitter, not evidence
+    assert run(conn).delisted == 0  # paging jitter, not evidence
     assert db.get_listing(conn, 4)["delisted_at"] is None
 
     FakeFunda([[1, 2], [3]]).install(monkeypatch)
-    assert run(conn, tmp_path).delisted == 1
+    assert run(conn).delisted == 1
     assert db.get_listing(conn, 4)["delisted_at"] is not None
 
 
 def test_a_delisted_listing_keeps_all_its_data(
-    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     FakeFunda([[1, 2]]).install(monkeypatch)
-    run(conn, tmp_path)
+    run(conn)
     FakeFunda([[1]]).install(monkeypatch)
-    run(conn, tmp_path)
-    run(conn, tmp_path)
+    run(conn)
+    run(conn)
 
     assert db.get_listing(conn, 2) is not None
     assert db.get_features(conn, 2)
@@ -260,10 +254,8 @@ def test_a_delisted_listing_keeps_all_its_data(
 # --- run bookkeeping -------------------------------------------------------
 
 
-def test_the_run_is_recorded(
-    conn: sqlite3.Connection, tmp_path: Path, funda: FakeFunda
-) -> None:
-    run(conn, tmp_path)
+def test_the_run_is_recorded(conn: sqlite3.Connection, funda: FakeFunda) -> None:
+    run(conn)
     row = db.latest_run(conn)
     assert row is not None
     assert row["complete"] == 1
@@ -272,10 +264,10 @@ def test_the_run_is_recorded(
 
 
 def test_a_failed_run_is_recorded_as_incomplete(
-    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     FakeFunda([[1, 2], [3, 4]], block_on_page=1).install(monkeypatch)
-    run(conn, tmp_path)
+    run(conn)
     row = db.latest_run(conn)
     assert row is not None
     assert row["complete"] == 0
@@ -284,15 +276,13 @@ def test_a_failed_run_is_recorded_as_incomplete(
 
 def test_progress_messages_are_emitted_not_printed(
     conn: sqlite3.Connection,
-    tmp_path: Path,
     funda: FakeFunda,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     messages: list[str] = []
     pipeline.run_fetch(
         conn,
-        tmp_path / "media",
-        pipeline.FetchOptions(search_url="https://example.test/z", with_photos=False),
+        pipeline.FetchOptions(search_url="https://example.test/z"),
         progress=messages.append,
     )
     assert any("page 1/" in m for m in messages)

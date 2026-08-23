@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from housemaster import db
-from housemaster.models import Detail, Feature, FetchReport, StoredPhoto
+from housemaster.models import Detail, Feature, FetchReport
 
 from .test_models import make_listing
 
@@ -35,6 +35,39 @@ def test_connect_creates_the_schema(conn: sqlite3.Connection) -> None:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {"listings", "features", "photos", "price_history", "fetch_runs"} <= tables
+
+
+def test_the_photos_table_holds_ids_only(conn: sqlite3.Connection) -> None:
+    # Nothing is downloaded any more, so nothing describes a file on disk.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(photos)")}
+    assert columns == {"listing_id", "position", "image_id"}
+
+
+def test_upgrading_a_v1_cache_keeps_its_photo_ids(tmp_path: Path) -> None:
+    """The point of a migration rather than a rebuild: the ids are still good.
+
+    A v1 cache carries the download columns and rows filled in by the old photo
+    pass. Migrating drops the columns; the image ids that build a CDN URL are
+    exactly what survives.
+    """
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path)
+    with old:
+        db._migration_001_initial(old)
+        old.execute("PRAGMA user_version = 1")
+        db.upsert_listing(old, make_listing(listing_id=1, photo_ids=("a", "b")))
+        old.execute(
+            "UPDATE photos SET local_path = '1/00.jpg', width = 720 "
+            "WHERE listing_id = 1 AND position = 0"
+        )
+    old.close()
+
+    upgraded = db.connect(path)
+    try:
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
+        assert [row["image_id"] for row in db.get_photos(upgraded, 1)] == ["a", "b"]
+    finally:
+        upgraded.close()
 
 
 def test_migrations_are_idempotent(conn: sqlite3.Connection) -> None:
@@ -150,28 +183,21 @@ def test_tiny_id_is_taken_from_the_url(conn: sqlite3.Connection) -> None:
     assert row["tiny_id"] == "44561281"
 
 
-def test_photo_ids_are_registered_on_insert(conn: sqlite3.Connection) -> None:
+def test_photo_ids_are_registered_in_order(conn: sqlite3.Connection) -> None:
+    # The ids are the whole photo story now: each one builds a CDN URL.
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("a", "b", "c")))
-    photos = db.get_photos(conn, 1)
-    assert [row["image_id"] for row in photos] == ["a", "b", "c"]
-    assert all(row["local_path"] is None for row in photos)
+    assert [row["image_id"] for row in db.get_photos(conn, 1)] == ["a", "b", "c"]
 
 
-def test_reregistering_photos_does_not_clear_downloaded_ones(
-    conn: sqlite3.Connection,
-) -> None:
+def test_a_reordered_gallery_is_rewritten_in_place(conn: sqlite3.Connection) -> None:
+    # Funda reorders galleries; position is the key, so the row is updated
+    # rather than duplicated.
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("a", "b")))
-        db.record_photo(
-            conn,
-            StoredPhoto(
-                listing_id=1, position=0, width=720, local_path="1/00.jpg", size_bytes=99
-            ),
-        )
     with conn:
-        db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("a", "b")))
-    assert db.get_photos(conn, 1)[0]["local_path"] == "1/00.jpg"
+        db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("b", "a")))
+    assert [row["image_id"] for row in db.get_photos(conn, 1)] == ["b", "a"]
 
 
 # --- detail ----------------------------------------------------------------
@@ -272,7 +298,7 @@ def test_delisting_never_deletes_data(conn: sqlite3.Connection) -> None:
     delist(conn, set())
     delist(conn, set())
     assert db.get_listing(conn, 1) is not None
-    assert db.counts(conn) == {"total": 1, "active": 0, "enriched": 0, "photos": 0}
+    assert db.counts(conn) == {"total": 1, "active": 0, "enriched": 0}
 
 
 def test_a_relisted_house_is_un_delisted(conn: sqlite3.Connection) -> None:
@@ -284,16 +310,6 @@ def test_a_relisted_house_is_un_delisted(conn: sqlite3.Connection) -> None:
         db.upsert_listing(conn, make_listing(listing_id=1))
     delist(conn, {1})
     assert db.get_listing(conn, 1)["delisted_at"] is None
-
-
-def test_a_dead_photo_stops_being_retried(conn: sqlite3.Connection) -> None:
-    with conn:
-        db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("a",)))
-    for _ in range(db.MAX_PHOTO_ATTEMPTS):
-        assert db.photos_needing_download(conn, per_listing=5)
-        with conn:
-            db.record_photo_failure(conn, 1, 0, "404")
-    assert db.photos_needing_download(conn, per_listing=5) == []
 
 
 # --- queries ---------------------------------------------------------------

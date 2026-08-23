@@ -31,12 +31,13 @@
   </div>
 
   {% macro shot(photo, index) %}
-    {% set src = url_for('browse.media_file', filename=photo.local_path)
-                 if photo.local_path else photo_url(photo.image_id, 720) %}
-    {# The href is the no-JS fallback; lightbox.js intercepts the click. #}
+    {# Both sizes come from funda's CDN. The href is the no-JS fallback;
+       lightbox.js intercepts the click and shows the same 1440px image. #}
     <a href="{{ photo_url(photo.image_id, 1440) }}">
-      <img src="{{ src }}" alt="Photo {{ index }} of {{ listing.address }}"
-           loading="{{ 'eager' if index <= 3 else 'lazy' }}" decoding="async">
+      <img src="{{ photo_url(photo.image_id, 720) }}"
+           alt="Photo {{ index }} of {{ listing.address }}"
+           loading="{{ 'eager' if index <= 3 else 'lazy' }}" decoding="async"
+           referrerpolicy="no-referrer">
     </a>
   {% endmacro %}
 

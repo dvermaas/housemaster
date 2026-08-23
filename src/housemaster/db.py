@@ -18,10 +18,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from housemaster.models import Detail, Listing, StoredPhoto
+from housemaster.models import Detail, Listing
 
 DEFAULT_DB_PATH = Path("data/housemaster.db")
-MAX_PHOTO_ATTEMPTS = 3
 
 
 def utcnow() -> str:
@@ -142,7 +141,31 @@ def _migration_001_initial(conn: sqlite3.Connection) -> None:
     """)
 
 
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_migration_001_initial,)
+def _migration_002_drop_photo_storage(conn: sqlite3.Connection) -> None:
+    """Photos are hotlinked from funda's CDN now, not downloaded.
+
+    The image ids stay -- they are what builds a URL -- but everything that
+    described a *file on disk* goes, along with the retry bookkeeping that only
+    existed because a download could fail. `listings.photo_count` stays: it
+    comes from the search payload, not from anything we fetched.
+
+    Existing rows keep their ids, so an upgraded cache renders straight away.
+    """
+    conn.executescript("""
+        ALTER TABLE photos DROP COLUMN local_path;
+        ALTER TABLE photos DROP COLUMN bytes;
+        ALTER TABLE photos DROP COLUMN downloaded_at;
+        ALTER TABLE photos DROP COLUMN attempts;
+        ALTER TABLE photos DROP COLUMN last_error;
+        ALTER TABLE photos DROP COLUMN width;
+        ALTER TABLE fetch_runs DROP COLUMN photos_downloaded;
+    """)
+
+
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
+    _migration_001_initial,
+    _migration_002_drop_photo_storage,
+)
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -355,33 +378,6 @@ def reconcile_presence(
     return cursor.rowcount
 
 
-def record_photo_failure(
-    conn: sqlite3.Connection, listing_id: int, position: int, error: str
-) -> None:
-    """Count a failed attempt so a permanently dead image stops being retried."""
-    conn.execute(
-        "UPDATE photos SET attempts = attempts + 1, last_error = ? "
-        "WHERE listing_id = ? AND position = ?",
-        (error[:200], listing_id, position),
-    )
-
-
-def record_photo(conn: sqlite3.Connection, photo: StoredPhoto) -> None:
-    """Mark one photo as cached on disk."""
-    conn.execute(
-        "UPDATE photos SET width = ?, local_path = ?, bytes = ?, downloaded_at = ? "
-        "WHERE listing_id = ? AND position = ?",
-        (
-            photo.width,
-            photo.local_path,
-            photo.size_bytes,
-            utcnow(),
-            photo.listing_id,
-            photo.position,
-        ),
-    )
-
-
 # --- run bookkeeping -------------------------------------------------------
 
 
@@ -399,7 +395,7 @@ def finish_run(conn: sqlite3.Connection, run_id: int, report: Any) -> None:
         conn.execute(
             "UPDATE fetch_runs SET finished_at = ?, pages_read = ?, seen = ?, "
             "new_listings = ?, price_changes = ?, status_changes = ?, delisted = ?, "
-            "details_fetched = ?, photos_downloaded = ?, complete = ?, error = ? "
+            "details_fetched = ?, complete = ?, error = ? "
             "WHERE run_id = ?",
             (
                 utcnow(),
@@ -410,7 +406,6 @@ def finish_run(conn: sqlite3.Connection, run_id: int, report: Any) -> None:
                 report.status_changes,
                 report.delisted,
                 report.details_fetched,
-                report.photos_downloaded,
                 int(report.complete),
                 report.error,
                 run_id,
@@ -431,17 +426,6 @@ def listings_needing_detail(
         "WHERE detail_fetched_at IS NULL AND delisted_at IS NULL "
         "ORDER BY first_seen_at LIMIT ?",
         (-1 if limit is None else limit,),  # SQLite reads a negative LIMIT as "all"
-    ).fetchall()
-
-
-def photos_needing_download(
-    conn: sqlite3.Connection, per_listing: int, limit: int | None = None
-) -> list[sqlite3.Row]:
-    return conn.execute(
-        "SELECT listing_id, position, image_id FROM photos "
-        "WHERE local_path IS NULL AND position < ? AND attempts < ? "
-        "ORDER BY listing_id, position LIMIT ?",
-        (per_listing, MAX_PHOTO_ATTEMPTS, -1 if limit is None else limit),
     ).fetchall()
 
 
@@ -485,14 +469,10 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
                SUM(detail_fetched_at IS NOT NULL) AS enriched
         FROM listings
     """).fetchone()
-    photos = conn.execute(
-        "SELECT COUNT(*) AS cached FROM photos WHERE local_path IS NOT NULL"
-    ).fetchone()
     return {
         "total": row["total"] or 0,
         "active": row["active"] or 0,
         "enriched": row["enriched"] or 0,
-        "photos": photos["cached"] or 0,
     }
 
 
@@ -543,9 +523,6 @@ class Filters:
 
 
 _CARD_EXTRAS = """
-    (SELECT p.local_path FROM photos p
-      WHERE p.listing_id = listings.listing_id AND p.local_path IS NOT NULL
-      ORDER BY p.position LIMIT 1) AS thumb,
     (SELECT p.image_id FROM photos p
       WHERE p.listing_id = listings.listing_id
       ORDER BY p.position LIMIT 1) AS first_image,
@@ -553,8 +530,8 @@ _CARD_EXTRAS = """
       WHERE h.listing_id = listings.listing_id AND h.price > listings.price
       ORDER BY h.price DESC LIMIT 1) AS price_was
 """
-"""Per-card extras: first cached photo, first CDN id as fallback, and the
-highest earlier price if this house has come down."""
+"""Per-card extras: the CDN id of the first photo, and the highest earlier
+price if this house has come down."""
 
 
 def _where(filters: Filters) -> tuple[str, list[Any]]:
@@ -606,8 +583,8 @@ def query_listings(
     # `col IS NULL` first puts houses missing that value last in either
     # direction; listing_id breaks ties so paging can never repeat a row.
     #
-    # The three subqueries give each card its thumbnail and price-drop marker in
-    # one round trip instead of N+1 lookups from the template.
+    # The two subqueries give each card its photo and price-drop marker in one
+    # round trip instead of N+1 lookups from the template.
     return conn.execute(
         f"SELECT *, {_CARD_EXTRAS} FROM listings{where} "  # noqa: S608
         f"ORDER BY {column} IS NULL, {column} {direction}, listing_id "

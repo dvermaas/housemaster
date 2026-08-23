@@ -2,12 +2,9 @@
    sized for a popup. #}
 <article class="popcard">
   <a href="{{ url_for('browse.house', listing_id=house.listing_id) }}">
-    {% if house.thumb %}
-      <img src="{{ url_for('browse.media_file', filename=house.thumb) }}"
-           alt="{{ house.address }}" loading="lazy">
-    {% elif house.first_image %}
+    {% if house.first_image %}
       <img src="{{ photo_url(house.first_image, 464) }}"
-           alt="{{ house.address }}" loading="lazy">
+           alt="{{ house.address }}" loading="lazy" referrerpolicy="no-referrer">
     {% endif %}
   </a>
 

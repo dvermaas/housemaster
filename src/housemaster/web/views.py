@@ -15,11 +15,9 @@ from flask import (
     Blueprint,
     Response,
     abort,
-    current_app,
     jsonify,
     render_template,
     request,
-    send_from_directory,
     url_for,
 )
 
@@ -218,12 +216,4 @@ def house(listing_id: int) -> str:
         first_price=history[0]["price"] if history else None,
         status_label=status_label,
         GALLERY_PREVIEW=GALLERY_PREVIEW,
-    )
-
-
-@bp.route("/media/<path:filename>")
-def media_file(filename: str) -> Response:
-    # send_from_directory rejects traversal outside the root itself.
-    return send_from_directory(
-        current_app.config["MEDIA_ROOT"], filename, max_age=31536000
     )
