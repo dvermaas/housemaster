@@ -20,6 +20,7 @@ class Listing:
     neighbourhood: str
     price: int | None
     price_condition: str
+    """Carries the *unit*: `kosten_koper` for a purchase, `per_month` for rent."""
     living_area: int | None
     rooms: int | None
     bedrooms: int | None
@@ -30,6 +31,8 @@ class Listing:
     published: str
     agent: str
     url: str
+    offering_type: str = "buy"
+    """`buy` or `rent`. `price` means something different for each -- see db.Filters."""
     photo_ids: tuple[str, ...] = ()
     """CDN paths for every photo, in funda's order. Verified to be the full set."""
 
@@ -103,6 +106,7 @@ class Boundary:
     how funda shaped it.
     """
 
+    city: str
     name: str
     slug: str
     geometry: str

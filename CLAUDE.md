@@ -21,7 +21,7 @@ uv sync                                # install/refresh .venv; installs the pac
 uv add <pkg>                           # runtime dependency
 uv add --dev <pkg>                     # dev dependency (goes to [dependency-groups].dev)
 
-uv run housemaster add <url>           # track a funda search
+uv run housemaster add <url>           # track a funda search (koop or huur)
 uv run housemaster rm <id>             # stop tracking one (ids come from `status`)
 uv run housemaster fetch               # scrape EVERY tracked search into ./data
 uv run housemaster fetch --max-pages 2 --max-details 5
@@ -88,6 +88,20 @@ Search state lives at `state["pinia"]["search"]` (`listings`, `totalListingsCoun
 
 Errors derive from `FundaError`: `BlockedError` (bot wall) and `PayloadError` (page loaded, shape unexpected). The CLI catches `FundaError` and returns exit 1.
 
+### Buy and rent live in one table
+
+`offering_type` (migration 005) is `buy` or `rent`. Only the price field differs between a rental and a purchase payload — address, features, photos, coordinates and every child table are identical — so this is one discriminator column, **not** a second table and not a second database. Keeping them together is what makes a rent-to-buy comparison per buurt a `GROUP BY` instead of a cross-file join.
+
+**`price` means euros to buy and euros *per month* to rent**, with the unit carried by `price_condition` (`kosten_koper` / `per_month`). `price_per_m2` follows — €/m² purchase versus €/m² per month, both meaningful in their own right.
+
+- **They are only comparable within one `offering_type`.** `Filters.offering_type` is therefore mandatory and `_where` always emits it, which scopes `query_listings`, `count_listings`, `query_map_points`, `count_map_points` and `map_bounds` for free. Five helpers do not go through `_where` and take it explicitly: `price_bounds`, `area_bounds`, `label_counts`, `distinct_neighbourhoods`, `counts` (which alone accepts `None`, for `status`).
+- **A listing's offering type comes from its payload** (`offering_type: ['rent']`), never from the search URL. The same property can be listed both ways as two listings with two globalIds. The `searches` column is a label for `status` only.
+- **Rent is normalised to monthly at extraction.** About one rental in sixty is quoted `per_year` (they are parking spaces); leaving both scales in one column would make every comparison silently wrong. funda's own wording survives verbatim in the kenmerken.
+- **The UI never mixes them** — a Buy/Rent switch in `.results-head`, and `offering` is a hidden input **inside `#results`** for the same reason `view` is.
+- **Switching mode drops `price_min`/`price_max`.** A 0–1800 rent range is meaningless for buying. Every other filter survives.
+- Reconciliation deliberately spans both: a run may sweep buy and rent searches, and presence is a property of the union.
+- The buurt choropleth is a **purchase** €/m² map — `localInsights` returns purchase prices even on a rental detail page. It is geography under a rental view, not a rent benchmark.
+
 ### Tracked searches
 
 `searches` (migration 004) holds the set of funda search URLs the cache follows. `fetch` with no `--url` walks all of them; `--url` is an ad-hoc override that is *not* saved. `add` does one live request to confirm the URL resolves and report what it holds — `--no-check` skips it. `rm <id>` stops tracking but **keeps the houses**: they delist through the normal two-strike reconciliation, which is what `delisted_at` has always meant ("stopped matching any tracked search", not "sold"). Deleting listings on `rm` would throw away price history for houses that may still be live.
@@ -108,7 +122,7 @@ Passing the wall depends only on the TLS/JA3 fingerprint, so every request must 
 - `price_history` has a surrogate key, not `(listing_id, observed_at)` — timestamps are second-granular and one run stamps every row identically, so a composite key silently swallows a second change in the same second.
 - Three id spaces on one listing: `globalId` (the primary key, and what search results call `id`), `tinyId` (the number in the detail URL), and a third in `friendlyUrlSlug`. Key on `globalId`; never join on the URL number.
 - `price_per_m2` is a **STORED** generated column — virtual ones cannot be indexed, and it is a sort key.
-- **Boundaries are keyed on the buurt *name***, because that is what a listing carries — funda never gives us a buurt identifier. The slug is derived (`neighbourhood_slug`) and is therefore a column, not the key.
+- **Boundaries are keyed on `(city, name)`** (migration 006), because buurt names repeat across municipalities — there is a `Bomenbuurt` in both Den Haag and Rijswijk, and a `Kleurenbuurt` in both Rijswijk and Voorburg. Keyed on the name alone, the second fetch overwrites the first and the choropleth draws one city's outline over another city's houses. Both halves of the slug come from `neighbourhood_slug`: funda's city identifiers follow the same rule, so `Rijswijk (ZH)` is `rijswijk-zh`. **A buurt only resolves under its own city** — `den-haag/cromvliet` answers with the unfiltered search rather than a neighbourhood, which is why `fetch_boundary` takes the city and every boundary join matches on it.
 - **Delisting reconciles against the UNION of every tracked search**, never per search. `run_fetch` accumulates one `seen` set across all of them and reconciles once at the end. Reconciling inside the per-search loop would have each sweep delist every *other* search's houses — a silent, total data-corruption bug. `report.complete` likewise means "every page of every search was walked"; one capped or blocked search makes the whole run partial.
 - **Nothing records which search found a house.** Presence is a property of the union, which is exactly what reconciliation needs; anything finer would have to be maintained per search and would make "gone" ambiguous.
 
@@ -153,6 +167,8 @@ Swaps the card grid for a MapLibre map of the same filtered set; the rail is sha
 Three things that will break if disturbed:
 
 - **The map instance is created once.** `#map` carries `hx-preserve` so a filter change only calls `source.setData(newUrl)` — rebuilding it on every swap would throw away the viewport the user panned to. Switching to the grid *does* remove the node (hx-preserve needs it in both old and new markup), so `sync()` calls `dropIfDetached()` to tear down the dead instance and free its WebGL context before making a new one.
+- **Filters are remembered per offering type** in `localStorage`, keyed `housemaster-filters-v1:{buy,rent}`. Three rules make it safe: the **URL stays the source of truth**, so a restore only fires on a URL carrying *no* filter parameter and a shared link always wins; saving happens on `htmx:afterSwap` only, never on arrival, so opening someone else's link cannot overwrite your own set; and **"Clear all filters" removes the stored entry**, or the next bare URL puts them straight back and the button looks broken. The restore runs **pre-paint** in an inline `{% block head %}` script with `location.replace` — rendering 3 000 houses and then swapping would flash, and `assign` would leave a history entry that Back bounces off. A loop is impossible because the replacement URL always carries a filter.
+- **`views.FILTER_KEYS` is the single definition of "what is a filter"**, rendered as `data-filter-keys` for `nav.js` rather than restated in JS. `view`, `offering` and `page` are deliberately absent — they are properties of the page, and storing `page` would restore someone to page 5 of a search they left. Two tests pin it: every key must actually change `filters_from_args`, and the count must match `db.Filters`' field count.
 - **The rail is rendered once, on a full page load.** Only `#results` is swapped, so anything in the rail that depends on the current view goes stale after a view switch. `reset_url` is rendered server-side (correct on load and without JS) *and* corrected by `nav.js` on `htmx:afterSwap` — otherwise "Clear all filters" on the map drops you back to the grid. Clearing filters keeps the view: it is a property of the page, not of the filter set.
 - **`<input type="hidden" name="view">` lives inside `#results`, not the rail.** The filter form serialises its whole subtree and `#results` is reserialised on every swap; move it to the rail and it goes stale, and filtering on the map drops you back to the grid.
 - **Bounds come from `db.map_bounds`, not from the GeoJSON.** Fitting the view by downloading the feature collection a second time both wasted a request and raced the source load.
@@ -216,11 +232,36 @@ Practical notes when driving the browser:
 - The free CloakBrowser licence allows **one concurrent session** — close the page when done, and never design around parallel browser workers.
 - `.playwright-mcp/` at the repo root is the MCP's output directory (snapshots, screenshots), not project source. Tool calls that take a `filename` write to the MCP server's own cwd — which is the repo root, so clean up stray screenshots.
 
+## Docker
+
+`Dockerfile` (Alpine, multi-stage) + `compose.yaml` (`web`, `scheduler`, `cli`, `tunnel`). ~140 MB.
+
+- **Alpine only works because `curl_cffi` ships musllinux wheels for cp314.** Without them the build would compile curl-impersonate from source. `UV_NO_BUILD=1` is set **on the dependency layer only** so a missing wheel fails loudly; the project itself has no wheel and is built in the next layer, which is why the guard cannot be global.
+- **gunicorn, not `housemaster serve`.** Werkzeug's server is a development server and would be facing the internet. It is an optional extra (`--extra serve`) so the core runtime surface stays `curl_cffi` + `flask`. Entry point is `housemaster.web.wsgi:app`, which reads `$HOUSEMASTER_DB` and **raises at import** if the cache is missing.
+- **`--preload` is load-bearing.** Without it that import error happens inside a worker, and gunicorn answers by respawning forever — the container never exits and just spins. Nothing is opened at import (connections are per-request via `flask.g`), so preloading costs nothing.
+- **`wsgi.py` creates the cache file if the volume is new**, which is the web app's only write and happens once at start-up; requests still open read-only. Without it a first `up` crash-loops on a database that is not there.
+- **The host port is 8766**, deliberately not 8765 — that is `housemaster serve`'s own default, and a dev server on the host makes compose fail with "ports are not available". The tunnel does not use the published port at all.
+- `HOUSEMASTER_DB` is set in the Dockerfile, so compose does not repeat it.
+- **`scheduler` and `cli` need `entrypoint: [housemaster]`** — the image's CMD is gunicorn and there is no ENTRYPOINT, so a bare `command: [schedule]` looks for an executable called `schedule`.
+
+### The daily fetch
+
+`housemaster schedule` sleeps until the next `--at` in `--tz`, fetches, repeats.
+
+- **`schedule.next_run` computes from the local *date*, never by adding 24 hours.** Adding a day drifts the run an hour across a daylight-saving change, which nobody notices until the March run lands at 05:00. Tested against both clock-change nights.
+- The wait is recomputed from the clock each cycle rather than counted down, so a suspended machine or a slow fetch cannot make the schedule drift.
+- **A failed fetch is logged, never fatal** — a nightly job has to still be there tomorrow.
+- **`cli._fetch_lock` stops two fetches overlapping.** They would not corrupt anything (SQLite serialises writes) but they contend for the writer lock until one gives up mid-run, and ask funda for the same pages twice. A killed run's lock expires after `STALE_LOCK_AFTER` rather than wedging the schedule forever.
+- **`tzdata` is a dependency on Windows only** (`sys_platform == 'win32'`). Windows ships no system time-zone database, so `zoneinfo` cannot resolve `Europe/Amsterdam`; Linux and the Alpine image already have one, so the container's runtime surface is still exactly curl_cffi + flask.
+- **`cloudflared` dials out**; no port is published to the internet. Its Public Hostname points at `http://web:8765` over the compose network. The token lives in `.env`, which is gitignored.
+- `data/` is in `.dockerignore` — it is a volume, and baking tens of MB that change every fetch would bust the layer cache on every build.
+
 ## Other constraints
 
 - Optional CloakBrowser extras are **not** installed: `geoip2`, `aiohttp`, `websockets`. `geoip=True` needs `uv add geoip2` plus a DB download first.
 - `mcp__claude-in-chrome__*` may also be available; it drives the user's real Chrome and is not stealth — prefer the cloakbrowser server for funda.
 - One request yields 15 fully-detailed listings. Pace them (`pipeline.DEFAULT_PACE`), and remember a detail page is fetched once per house ever, a buurt outline once per buurt ever, and photos cost no requests at all.
 - **funda's slug rule deletes periods rather than hyphenating them**: `Koningsplein e.o.` is `koningsplein-eo`. Three Den Haag buurten are named `... e.o.` and all three fail under a naive slugify.
+- **`selected_area` takes a comma-separated list**: `den-haag,rijswijk-zh,voorburg` resolves to three `city` areas in one search. Ypenburg and Leidschenveen (postcodes 2492–2498) *are* Den Haag — annexed in 2002 — while Voorburg and Rijswijk are separate municipalities, which is why the map's eastern lobe is detached.
 - Windows consoles default to cp1252 and mangle `€`/`m²`/Dutch names. `cli._use_utf8_output()` reconfigures the streams; any new entry point needs the same.
 - Ruff enables `T20` (no stray `print`) everywhere except `cli.py`. Library code returns data or calls a `progress` callback; the CLI prints. Keep it that way rather than widening the ignore.

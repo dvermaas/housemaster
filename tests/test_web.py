@@ -6,6 +6,7 @@ dependency, no network, no running server.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from flask.testing import FlaskClient
 
 from housemaster import db
 from housemaster.models import Boundary, Detail, Feature
-from housemaster.web import create_app
+from housemaster.web import create_app, filters, views
 
 from .test_models import make_listing
 
@@ -69,6 +70,7 @@ def cache(tmp_path: Path) -> Path:
         db.save_boundary(
             conn,
             Boundary(
+                "Den Haag",
                 "Spoorwijk",
                 "spoorwijk",
                 '{"type":"Polygon","coordinates":'
@@ -167,7 +169,10 @@ def test_an_injection_attempt_in_the_sort_falls_back(client: FlaskClient) -> Non
 def test_no_matches_gives_a_useful_empty_state(client: FlaskClient) -> None:
     page = body(client.get("/?price_min=9000000"))
     assert "No houses match" in page
-    assert "Widen the price range" in page
+    # Filters can arrive from a previous visit, so the way out has to be here
+    # and not only at the foot of the rail.
+    assert "clear all filters" in page
+    assert 'class="reset"' in page
 
 
 # --- htmx ------------------------------------------------------------------
@@ -469,7 +474,7 @@ def test_the_map_says_when_houses_lack_coordinates(client: FlaskClient) -> None:
     # Only house 1 has a detail page in the fixture, so 1 of 3 is mappable.
     page = body(client.get("/?view=map"))
     assert "mapnote" in page
-    assert "have coordinates yet" in page
+    assert "have coordinates" in page
 
 
 def test_no_note_when_the_map_shows_everything(client: FlaskClient) -> None:
@@ -508,8 +513,7 @@ def test_the_hidden_attribute_actually_hides() -> None:
     reporting `hidden === true`.
     """
     css = (
-        Path(__file__).resolve().parents[1]
-        / "src/housemaster/web/static/app.css"
+        Path(__file__).resolve().parents[1] / "src/housemaster/web/static/app.css"
     ).read_text(encoding="utf-8")
     assert "[hidden] { display: none !important; }" in css
 
@@ -541,3 +545,118 @@ def test_the_rail_reset_is_corrected_after_a_view_swap(client: FlaskClient) -> N
     """
     page = body(client.get("/"))
     assert "nav.js" in page
+
+
+# --- buy vs rent -----------------------------------------------------------
+
+
+def test_the_mode_switch_is_present_and_defaults_to_buy(client: FlaskClient) -> None:
+    page = body(client.get("/"))
+    assert 'class="offering"' in page
+    assert 'data-offering="buy"' in page
+
+
+def test_switching_mode_drops_the_price_bounds(client: FlaskClient) -> None:
+    """The trap: a 0-1800 rent range is meaningless for buying.
+
+    Carrying price_min/price_max across the switch would silently filter one
+    market with the other's numbers.
+    """
+    page = body(client.get("/?price_min=250000&price_max=350000"))
+    start = page.index('class="offering"')
+    control = page[start : page.index("</div>", start)]
+    assert "offering=rent" in control
+    assert "price_min" not in control
+    assert "price_max" not in control
+
+
+def test_other_filters_survive_the_switch(client: FlaskClient) -> None:
+    page = body(client.get("/?rooms_min=3&view=map"))
+    start = page.index('class="offering"')
+    control = page[start : page.index("</div>", start)]
+    assert "rooms_min=3" in control
+    assert "view=map" in control
+
+
+def test_the_offering_is_carried_in_the_form(client: FlaskClient) -> None:
+    # Inside #results, so it is reserialised on every swap like `view`.
+    page = body(client.get("/?offering=rent"))
+    marker = '<input type="hidden" name="offering" value="rent">'
+    assert marker in page
+    assert page.index('id="results"') < page.index(marker)
+
+
+def test_clearing_filters_keeps_the_mode(client: FlaskClient) -> None:
+    page = body(client.get("/?offering=rent&price_min=1000"))
+    start = page.index('class="reset"')
+    link = page[start : page.index("</a>", start)]
+    assert "offering=rent" in link
+    assert "price_min" not in link
+
+
+def test_an_unknown_offering_falls_back_to_buy(client: FlaskClient) -> None:
+    assert 'data-offering="buy"' in body(client.get("/?offering=../etc/passwd"))
+
+
+def test_the_price_legend_follows_the_mode(client: FlaskClient) -> None:
+    assert "Asking price" in body(client.get("/"))
+    assert "Rent per month" in body(client.get("/?offering=rent"))
+
+
+def test_a_rental_per_m2_figure_says_it_is_monthly(client: FlaskClient) -> None:
+    """Unqualified, "EUR 19/m2" beside a purchase page's "EUR 5.629/m2" reads
+    as an absurd bargain rather than a monthly rate."""
+    assert filters.per_m2("rent") == "/m² p/mnd"
+    assert filters.per_m2("buy") == "/m²"
+    # And a purchase card is left alone.
+    assert "p/mnd" not in body(client.get("/"))
+
+
+# --- remembered filters ----------------------------------------------------
+
+
+def test_every_filter_key_actually_filters() -> None:
+    """A key that no longer does anything would be stored and never restored."""
+    app = create_app(Path("unused.db"))
+    # `delisted` is a checkbox and only responds to its own value.
+    sample = {"delisted": "1"}
+    for key in views.FILTER_KEYS:
+        with app.test_request_context(f"/?{key}={sample.get(key, '3')}"):
+            assert views.filters_from_args() != db.Filters(), key
+
+
+def test_the_filter_key_list_covers_every_filter() -> None:
+    """Canary against the opposite drift: a new filter nobody remembers.
+
+    `Filters` carries one field per filter plus `offering_type`, which is a
+    property of the page rather than of the filter set.
+    """
+    assert len(views.FILTER_KEYS) == len(dataclasses.fields(db.Filters)) - 1
+
+
+def test_page_properties_are_not_stored_as_filters() -> None:
+    # Storing `page` would restore someone to page 5 of a search they left.
+    for key in ("view", "offering", "page"):
+        assert key not in views.FILTER_KEYS
+
+
+def test_the_markup_carries_the_filter_keys(client: FlaskClient) -> None:
+    # The browser reads the list from here rather than keeping its own copy.
+    page = body(client.get("/"))
+    assert f'data-filter-keys="{",".join(views.FILTER_KEYS)}"' in page
+
+
+def test_the_restore_script_runs_before_the_body(client: FlaskClient) -> None:
+    page = body(client.get("/"))
+    head = page[: page.index("</head>")]
+    assert "housemaster-filters-v1" in head
+
+
+def test_the_restore_script_knows_which_side_it_is_on(client: FlaskClient) -> None:
+    assert '"housemaster-filters-v1:" + "rent"' in body(client.get("/?offering=rent"))
+    assert '"housemaster-filters-v1:" + "buy"' in body(client.get("/"))
+
+
+def test_a_house_page_carries_no_restore_script(client: FlaskClient) -> None:
+    # It has no filter context, and redirecting away from a house would be rude.
+    assert "housemaster-filters-v1" not in body(client.get("/house/1"))

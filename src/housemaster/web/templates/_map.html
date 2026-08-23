@@ -26,8 +26,9 @@
         showing the first <b class="fig">{{ map_limit }}</b> of
         <b class="fig">{{ total }}</b> — narrow the filters to see the rest
       {% else %}
-        <b class="fig">{{ mapped }}</b> of <b class="fig">{{ total }}</b> houses
-        have coordinates yet — the rest arrive as <code>fetch</code> enriches them
+        <b class="fig">{{ mapped }}</b> of <b class="fig">{{ total }}</b>
+        {{ "rentals" if offering == "rent" else "houses" }}
+        have coordinates — the rest arrive as <code>fetch</code> enriches them
       {% endif %}
     </div>
   {% endif %}
@@ -39,25 +40,31 @@
     {# Disabled until the outlines exist. `fetch` collects them in its last
        pass, so a freshly reset cache has none for a while, and a toggle that
        silently does nothing is worse than one that says why. #}
+    {#
+      The scale lives *inside* the button rather than in a box of its own.
+      `.maptools` is anchored to the bottom of the map, so a separate box that
+      appears and disappears drags everything above it up and down. Folded in
+      here the panel only ever changes width, which nothing has to follow.
+
+      Labels are rendered server-side from the same scale the layer is coloured
+      by, so the legend cannot drift out of step with the map.
+    #}
     <button type="button" class="maptoggle" id="hood-toggle" aria-pressed="false"
             {% if not has_boundaries %}disabled
               title="No buurt outlines cached yet -- `housemaster fetch` collects them last"
             {% endif %}>
       <span class="maptoggle-swatch" aria-hidden="true"></span>
       <span>Buurten</span>
-    </button>
-
-    {# Labels rendered server-side from the same range the layer is coloured by,
-       so the legend cannot drift out of step with the map. #}
-    <div class="mapramp" id="hood-ramp" hidden>
-      <span class="maplegend-title">€/m²</span>
       {% if hood_scale %}
-        <span class="fig">{{ hood_scale[0] | compact }}</span>
-        <span class="mapramp-bar" aria-hidden="true"
-              title="Equal-count bins: about a fifth of buurten per step"></span>
-        <span class="fig">{{ hood_scale[-1] | compact }}</span>
+        <span class="mapramp" id="hood-ramp" hidden>
+          <span class="mapramp-unit">€/m²</span>
+          <span class="fig">{{ hood_scale[0] | compact }}</span>
+          <span class="mapramp-bar" aria-hidden="true"
+                title="Equal-count bins: about a fifth of buurten per step"></span>
+          <span class="fig">{{ hood_scale[-1] | compact }}</span>
+        </span>
       {% endif %}
-    </div>
+    </button>
 
     <div class="maplegend">
       <span class="maplegend-title">Energy</span>

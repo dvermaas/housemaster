@@ -13,7 +13,7 @@
   <div class="headline">
     <span class="price">{{ listing.price | euro }}</span>
     <span class="fig" style="color: var(--ink-soft)">{{ listing.price_condition | replace('_', ' ') }}</span>
-    <span class="fig">{{ listing.price_per_m2 | euro }}/m²</span>
+    <span class="fig">{{ listing.price_per_m2 | euro }}{{ listing.offering_type | per_m2 }}</span>
     <span class="fig">{{ listing.living_area or '—' }} m²</span>
     <span class="fig">{{ listing.rooms or '—' }} rooms · {{ listing.bedrooms or '—' }} bed</span>
     <span class="chip" data-label="{{ listing.energy_label }}"
@@ -119,7 +119,7 @@
             <dt>Average asking price</dt>
             <dd>{{ listing.neighbourhood_price_m2 | euro }}/m²</dd>
             <dt>This house</dt>
-            <dd>{{ listing.price_per_m2 | euro }}/m²</dd>
+            <dd>{{ listing.price_per_m2 | euro }}{{ listing.offering_type | per_m2 }}</dd>
           {% endif %}
           {% if listing.neighbourhood_inhabitants %}
             <dt>Inhabitants</dt>

@@ -47,6 +47,7 @@
   <script src="{{ url_for('static', filename='nav.js') }}" defer></script>
   <script src="{{ url_for('static', filename='map.js') }}" defer></script>
   <script src="{{ url_for('static', filename='lightbox.js') }}" defer></script>
+  {% block head %}{% endblock %}
 </head>
 <body>
   <header class="masthead">

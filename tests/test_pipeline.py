@@ -99,11 +99,11 @@ class FakeFunda:
             features=(Feature("bouw", "Bouw", 0, "Bouwjaar", "1931"),),
         )
 
-    def boundary(self, name: str) -> Boundary | None:
+    def boundary(self, city: str, name: str) -> Boundary | None:
         self.boundary_calls.append(name)
         if name in self.unresolvable:
             return None  # funda answered, but not with a neighbourhood
-        return Boundary(name, name.lower(), '{"type":"Polygon","coordinates":[]}')
+        return Boundary(city, name, name.lower(), '{"type":"Polygon","coordinates":[]}')
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
         monkeypatch.setattr(pipeline, "fetch_search_page", self.search)
@@ -360,7 +360,7 @@ def test_the_outline_pass_can_be_skipped(
 def test_a_block_during_the_outline_pass_stops_without_losing_the_run(
     conn: sqlite3.Connection, funda: FakeFunda, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def blocked(_name: str) -> Boundary | None:
+    def blocked(_city: str, _name: str) -> Boundary | None:
         raise BlockedError("no __NUXT_DATA__ -- likely the Akamai interstitial")
 
     monkeypatch.setattr(pipeline, "fetch_boundary", blocked)

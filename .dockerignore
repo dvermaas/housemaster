@@ -1,0 +1,20 @@
+# The cache is a volume, never baked into the image -- it is tens of MB and
+# changes every fetch, which would bust the layer cache on every build.
+data/
+
+.venv/
+.git/
+.github/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.playwright-mcp/
+.idea/
+.vscode/
+.mcp.json
+.env
+*.png

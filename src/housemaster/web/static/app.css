@@ -692,14 +692,32 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
 }
 
 /* Same body as the legend, so the panel reads as one object. */
-.maptoggle,
-.mapramp {
+.maptoggle {
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 6px 8px;
   background: color-mix(in srgb, var(--card) 92%, transparent);
   border: 1px solid var(--rule);
+}
+
+/* Folded into the button: appearing and disappearing changes the panel's
+   width, never its height, so nothing below it moves. */
+.mapramp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 3px;
+  padding-left: 9px;
+  border-left: 1px solid var(--rule);
+}
+.mapramp-unit {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+  /* The button uppercases its label; m² is a unit, not a word. */
+  text-transform: none;
 }
 
 .maptoggle {
@@ -730,9 +748,14 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
   border-color: var(--choro-5);
 }
 
-.mapramp .fig { font-family: var(--mono); font-size: 10px; color: var(--ink-soft); }
+.mapramp .fig {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink);
+  text-transform: none;
+}
 .mapramp-bar {
-  width: 92px;
+  width: 78px;
   height: 8px;
   border: 1px solid var(--rule);
   /* Hard stops, not a gradient: the layer draws five discrete quantile bins,
@@ -743,6 +766,31 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
     var(--choro-4) 60% 80%, var(--choro-5) 80% 100%
   );
 }
+
+/* Buy / Rent. A segmented control, drawn like a drafting tab strip: it is a
+   mode switch, so it reads as one object with one active cell rather than two
+   buttons. */
+.offering {
+  display: inline-flex;
+  border: 1px solid var(--rule-strong);
+}
+.offering-opt {
+  padding: 5px 13px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  text-decoration: none;
+  background: var(--card);
+}
+.offering-opt + .offering-opt { border-left: 1px solid var(--rule-strong); }
+.offering-opt:hover { color: var(--ink); background: var(--paper-sunk); }
+.offering-opt.on {
+  color: var(--paper);
+  background: var(--blueprint);
+}
+.offering-opt:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
 
 /* Says so when the map is not showing everything the filters matched. */
 .mapnote {

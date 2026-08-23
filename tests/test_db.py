@@ -55,7 +55,17 @@ def test_upgrading_a_v1_cache_keeps_its_photo_ids(tmp_path: Path) -> None:
     with old:
         db._migration_001_initial(old)
         old.execute("PRAGMA user_version = 1")
-        db.upsert_listing(old, make_listing(listing_id=1, photo_ids=("a", "b")))
+        # Seeded with raw SQL, not `upsert_listing`: the writer belongs to the
+        # current schema and would reference columns v1 never had. The point of
+        # this test is the migration, so the fixture has to be era-accurate.
+        old.execute(
+            "INSERT INTO listings (listing_id, url, address, first_seen_at, "
+            "last_seen_at) VALUES (1, 'u', 'Aaastraat 1', 'now', 'now')"
+        )
+        old.executemany(
+            "INSERT INTO photos (listing_id, position, image_id) VALUES (?, ?, ?)",
+            [(1, 0, "a"), (1, 1, "b")],
+        )
         old.execute(
             "UPDATE photos SET local_path = '1/00.jpg', width = 720 "
             "WHERE listing_id = 1 AND position = 0"
@@ -457,7 +467,7 @@ def test_a_buurt_with_listings_is_queued_for_an_outline(
 def test_a_fetched_outline_leaves_the_queue(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
-        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+        db.save_boundary(conn, Boundary("Den Haag", "Spoorwijk", "spoorwijk", RING))
     assert db.neighbourhoods_needing_boundary(conn) == []
 
 
@@ -469,7 +479,9 @@ def test_an_unresolvable_buurt_stops_being_retried(conn: sqlite3.Connection) -> 
     for _ in range(db.MAX_BOUNDARY_ATTEMPTS):
         assert db.neighbourhoods_needing_boundary(conn)
         with conn:
-            db.record_boundary_miss(conn, "Nowhere", "nowhere", "did not resolve")
+            db.record_boundary_miss(
+                conn, "Den Haag", "Nowhere", "nowhere", "did not resolve"
+            )
     assert db.neighbourhoods_needing_boundary(conn) == []
 
 
@@ -479,8 +491,10 @@ def test_a_miss_that_later_succeeds_clears_its_attempts(
     # This is what let the fixed `e.o.` slug rule recover the three misses.
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
-        db.record_boundary_miss(conn, "Spoorwijk", "bad-slug", "did not resolve")
-        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+        db.record_boundary_miss(
+            conn, "Den Haag", "Spoorwijk", "bad-slug", "did not resolve"
+        )
+        db.save_boundary(conn, Boundary("Den Haag", "Spoorwijk", "spoorwijk", RING))
     row = conn.execute("SELECT * FROM boundaries WHERE name = 'Spoorwijk'").fetchone()
     assert row["attempts"] == 0
     assert row["last_error"] is None
@@ -494,7 +508,7 @@ def test_shapes_carry_the_buurt_price_level(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE listings SET neighbourhood_price_m2 = 3929 WHERE listing_id = 1"
         )
-        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+        db.save_boundary(conn, Boundary("Den Haag", "Spoorwijk", "spoorwijk", RING))
     rows = db.neighbourhood_shapes(conn)
     assert [(r["name"], r["price_m2"]) for r in rows] == [("Spoorwijk", 3929)]
     # One buurt: every quantile edge collapses onto the same value.
@@ -506,7 +520,7 @@ def test_shapes_ignore_filters_and_delisting(conn: sqlite3.Connection) -> None:
     # houses inside them stop matching.
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Spoorwijk"))
-        db.save_boundary(conn, Boundary("Spoorwijk", "spoorwijk", RING))
+        db.save_boundary(conn, Boundary("Den Haag", "Spoorwijk", "spoorwijk", RING))
     delist(conn, set())
     delist(conn, set())
     assert len(db.neighbourhood_shapes(conn)) == 1
@@ -517,7 +531,7 @@ def test_an_unfetched_outline_is_not_offered_to_the_map(
 ) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, neighbourhood="Nowhere"))
-        db.record_boundary_miss(conn, "Nowhere", "nowhere", "did not resolve")
+        db.record_boundary_miss(conn, "Den Haag", "Nowhere", "nowhere", "did not resolve")
     assert db.neighbourhood_shapes(conn) == []
     assert db.neighbourhood_price_scale(conn) is None
 
@@ -538,7 +552,7 @@ def test_the_scale_uses_quantiles_not_an_even_split(conn: sqlite3.Connection) ->
                 "UPDATE listings SET neighbourhood_price_m2 = ? WHERE listing_id = ?",
                 (price, index),
             )
-            db.save_boundary(conn, Boundary(name, name.lower(), RING))
+            db.save_boundary(conn, Boundary("Den Haag", name, name.lower(), RING))
 
     scale = db.neighbourhood_price_scale(conn, bins=5)
     assert scale is not None
@@ -598,3 +612,141 @@ def test_removing_a_search_keeps_its_houses(conn: sqlite3.Connection) -> None:
     db.remove_search(conn, search_id)
     assert db.get_listing(conn, 1) is not None
     assert db.get_listing(conn, 1)["delisted_at"] is None
+
+
+# --- buy vs rent -----------------------------------------------------------
+
+
+def seed_both(conn: sqlite3.Connection) -> None:
+    """Two purchases and two rentals, priced on their own scales."""
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, price=400_000, living_area=80))
+        db.upsert_listing(
+            conn, make_listing(listing_id=2, price=600_000, living_area=100)
+        )
+        db.upsert_listing(
+            conn,
+            make_listing(
+                listing_id=3, price=1500, living_area=60,
+                offering_type="rent", price_condition="per_month",
+            ),
+        )  # fmt: skip
+        db.upsert_listing(
+            conn,
+            make_listing(
+                listing_id=4, price=2200, living_area=90,
+                offering_type="rent", price_condition="per_month",
+            ),
+        )  # fmt: skip
+
+
+def test_a_query_only_ever_sees_one_offering_type(conn: sqlite3.Connection) -> None:
+    seed_both(conn)
+    buys = db.query_listings(conn, db.Filters(offering_type="buy"))
+    rents = db.query_listings(conn, db.Filters(offering_type="rent"))
+    assert [r["listing_id"] for r in buys] == [1, 2]
+    assert [r["listing_id"] for r in rents] == [3, 4]
+
+
+def test_the_default_filter_is_buy(conn: sqlite3.Connection) -> None:
+    # Every existing caller predates rentals, so the default must not widen.
+    seed_both(conn)
+    assert db.Filters().offering_type == "buy"
+    assert db.count_listings(conn, db.Filters()) == 2
+
+
+def test_price_bounds_never_span_both_scales(conn: sqlite3.Connection) -> None:
+    """The concrete failure this scoping exists to prevent.
+
+    Unscoped, the slider would run from 1 500 to 600 000 and be unusable for
+    either mode.
+    """
+    seed_both(conn)
+    assert db.price_bounds(conn, "buy") == (400_000, 600_000)
+    assert db.price_bounds(conn, "rent") == (1500, 2200)
+
+
+def test_area_and_label_counts_are_scoped(conn: sqlite3.Connection) -> None:
+    seed_both(conn)
+    assert db.area_bounds(conn, "buy") == (80, 100)
+    assert db.area_bounds(conn, "rent") == (60, 90)
+    assert sum(db.label_counts(conn, "buy").values()) == 2
+    assert sum(db.label_counts(conn, "rent").values()) == 2
+
+
+def test_counts_can_scope_or_span(conn: sqlite3.Connection) -> None:
+    seed_both(conn)
+    assert db.counts(conn, "buy")["total"] == 2
+    assert db.counts(conn, "rent")["total"] == 2
+    assert db.counts(conn)["total"] == 4  # `status` wants the whole cache
+
+
+def test_price_per_m2_is_computed_for_rentals_too(conn: sqlite3.Connection) -> None:
+    # Meaningful in its own right: EUR/m2 per month is a normal rental quote.
+    seed_both(conn)
+    assert db.get_listing(conn, 3)["price_per_m2"] == 25  # 1500 / 60
+
+
+def test_a_rental_never_delists_a_purchase(conn: sqlite3.Connection) -> None:
+    # Reconciliation spans offering types, because a run may sweep both.
+    seed_both(conn)
+    delist(conn, {1, 2, 3, 4})
+    for listing_id in (1, 2, 3, 4):
+        assert db.get_listing(conn, listing_id)["delisted_at"] is None
+
+
+def test_existing_rows_migrate_to_buy(conn: sqlite3.Connection) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1))
+    assert db.get_listing(conn, 1)["offering_type"] == "buy"
+
+
+def test_searches_record_which_side_they_track(conn: sqlite3.Connection) -> None:
+    db.add_search(conn, "https://www.funda.nl/zoeken/koop?x", None, "buy")
+    db.add_search(conn, "https://www.funda.nl/zoeken/huur?x", None, "rent")
+    assert [r["offering_type"] for r in db.list_searches(conn)] == ["buy", "rent"]
+
+
+def test_the_same_buurt_name_in_two_cities_keeps_two_outlines(
+    conn: sqlite3.Connection,
+) -> None:
+    """Keyed on the name alone, the second fetch would overwrite the first.
+
+    Not hypothetical: adding Rijswijk and Voorburg to the tracked searches
+    immediately produced a `Bomenbuurt` in both Den Haag and Rijswijk, and a
+    `Kleurenbuurt` in both Rijswijk and Voorburg.
+    """
+    haag = RING
+    rijswijk = RING.replace("4.1", "4.3").replace("4.2", "4.4")
+    assert haag != rijswijk
+    with conn:
+        db.upsert_listing(
+            conn, make_listing(listing_id=1, neighbourhood="Bomenbuurt", city="Den Haag")
+        )
+        db.upsert_listing(
+            conn,
+            make_listing(listing_id=2, neighbourhood="Bomenbuurt", city="Rijswijk (ZH)"),
+        )
+        db.save_boundary(conn, Boundary("Den Haag", "Bomenbuurt", "bomenbuurt", haag))
+        db.save_boundary(
+            conn, Boundary("Rijswijk (ZH)", "Bomenbuurt", "bomenbuurt", rijswijk)
+        )
+
+    shapes = {(r["city"], r["geometry"]) for r in db.neighbourhood_shapes(conn)}
+    assert shapes == {("Den Haag", haag), ("Rijswijk (ZH)", rijswijk)}
+
+
+def test_the_outline_queue_is_per_city(conn: sqlite3.Connection) -> None:
+    with conn:
+        db.upsert_listing(
+            conn, make_listing(listing_id=1, neighbourhood="Bomenbuurt", city="Den Haag")
+        )
+        db.upsert_listing(
+            conn,
+            make_listing(listing_id=2, neighbourhood="Bomenbuurt", city="Rijswijk (ZH)"),
+        )
+        db.save_boundary(conn, Boundary("Den Haag", "Bomenbuurt", "bomenbuurt", RING))
+
+    # Den Haag is satisfied; Rijswijk still needs its own outline.
+    pending = db.neighbourhoods_needing_boundary(conn)
+    assert [(r["city"], r["name"]) for r in pending] == [("Rijswijk (ZH)", "Bomenbuurt")]

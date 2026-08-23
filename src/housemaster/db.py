@@ -20,6 +20,9 @@ from typing import Any
 
 from housemaster.models import Boundary, Detail, Listing
 
+BUY, RENT = "buy", "rent"
+OFFERING_TYPES = (BUY, RENT)
+
 DEFAULT_DB_PATH = Path("data/housemaster.db")
 MAX_BOUNDARY_ATTEMPTS = 2
 
@@ -207,11 +210,77 @@ def _migration_004_searches(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_005_offering_type(conn: sqlite3.Connection) -> None:
+    """Split buy from rent without splitting the table.
+
+    Between a rental and a purchase listing, *only* the price field differs --
+    address, features, photos, coordinates and every child table are identical.
+    So this is one discriminator column, not a second table and not a second
+    database: keeping them together is what makes a rent-to-buy comparison per
+    buurt a GROUP BY instead of a cross-file join.
+
+    `price` therefore means euros for a purchase and euros **per month** for a
+    rental, with the unit already carried by `price_condition`
+    (`kosten_koper` / `per_month`). They are only ever comparable within one
+    `offering_type` -- which is why `Filters.offering_type` is mandatory and
+    `_where` always emits it.
+
+    Existing rows are all purchases, so the default is correct untouched.
+    """
+    conn.executescript("""
+        ALTER TABLE listings ADD COLUMN offering_type TEXT NOT NULL DEFAULT 'buy';
+        ALTER TABLE searches ADD COLUMN offering_type TEXT NOT NULL DEFAULT 'buy';
+        CREATE INDEX idx_listings_offering ON listings(offering_type);
+    """)
+
+
+def _migration_006_boundaries_per_city(conn: sqlite3.Connection) -> None:
+    """Key outlines on `(city, name)`, because buurt names repeat across cities.
+
+    Tracking Rijswijk and Voorburg alongside Den Haag turned this from a
+    theoretical clash into a real one immediately -- there is a `Bomenbuurt` in
+    both Den Haag and Rijswijk, and a `Kleurenbuurt` in both Rijswijk and
+    Voorburg. Keyed on the name alone, whichever was fetched second would
+    overwrite the first and the choropleth would draw one city's outline over
+    the other city's houses.
+
+    A buurt slug also only resolves under its own city -- `den-haag/cromvliet`
+    returns the unfiltered search rather than a neighbourhood -- so the city has
+    to be stored anyway to be able to re-fetch one.
+
+    The primary key changes, so the table is rebuilt. Every existing row is Den
+    Haag, which is what the backfill asserts.
+    """
+    conn.executescript("""
+        ALTER TABLE boundaries RENAME TO boundaries_old;
+
+        CREATE TABLE boundaries (
+            city       TEXT NOT NULL,      -- matches listings.city
+            name       TEXT NOT NULL,      -- matches listings.neighbourhood
+            slug       TEXT NOT NULL,
+            geometry   TEXT,               -- GeoJSON geometry; NULL until fetched
+            fetched_at TEXT,
+            attempts   INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            PRIMARY KEY (city, name)
+        ) STRICT, WITHOUT ROWID;
+
+        INSERT INTO boundaries
+            (city, name, slug, geometry, fetched_at, attempts, last_error)
+        SELECT 'Den Haag', name, slug, geometry, fetched_at, attempts, last_error
+        FROM boundaries_old;
+
+        DROP TABLE boundaries_old;
+    """)
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001_initial,
     _migration_002_drop_photo_storage,
     _migration_003_boundaries,
     _migration_004_searches,
+    _migration_005_offering_type,
+    _migration_006_boundaries_per_city,
 )
 
 
@@ -256,7 +325,7 @@ _LISTING_COLUMNS = (
     "tiny_id", "url", "address", "postal_code", "city", "neighbourhood",
     "price", "price_condition", "living_area", "rooms", "bedrooms",
     "energy_label", "object_type", "construction_type", "status", "published",
-    "agent", "photo_count",
+    "agent", "photo_count", "offering_type",
 )  # fmt: skip
 
 
@@ -299,6 +368,7 @@ def upsert_listing(
         "published": listing.published,
         "agent": listing.agent,
         "photo_count": listing.photo_count,
+        "offering_type": listing.offering_type,
         "now": now,
     }
 
@@ -429,7 +499,10 @@ def reconcile_presence(
 
 
 def add_search(
-    conn: sqlite3.Connection, url: str, label: str | None = None
+    conn: sqlite3.Connection,
+    url: str,
+    label: str | None = None,
+    offering_type: str = BUY,
 ) -> tuple[int, bool]:
     """Track a search URL. Returns `(search_id, was_new)`.
 
@@ -443,8 +516,9 @@ def add_search(
         return int(existing["search_id"]), False
     with conn:
         cursor = conn.execute(
-            "INSERT INTO searches (url, label, added_at) VALUES (?, ?, ?)",
-            (url, label, utcnow()),
+            "INSERT INTO searches (url, label, added_at, offering_type) "
+            "VALUES (?, ?, ?, ?)",
+            (url, label, utcnow(), offering_type),
         )
     return int(cursor.lastrowid or 0), True
 
@@ -482,25 +556,31 @@ def save_boundary(
 ) -> None:
     """Store one outline. Idempotent: re-fetching simply overwrites."""
     conn.execute(
-        "INSERT INTO boundaries (name, slug, geometry, fetched_at, attempts) "
-        "VALUES (?, ?, ?, ?, 0) "
-        "ON CONFLICT (name) DO UPDATE SET slug = excluded.slug, "
+        "INSERT INTO boundaries (city, name, slug, geometry, fetched_at, attempts) "
+        "VALUES (?, ?, ?, ?, ?, 0) "
+        "ON CONFLICT (city, name) DO UPDATE SET slug = excluded.slug, "
         "geometry = excluded.geometry, fetched_at = excluded.fetched_at, "
         "attempts = 0, last_error = NULL",
-        (boundary.name, boundary.slug, boundary.geometry, now or utcnow()),
+        (
+            boundary.city,
+            boundary.name,
+            boundary.slug,
+            boundary.geometry,
+            now or utcnow(),
+        ),
     )
 
 
 def record_boundary_miss(
-    conn: sqlite3.Connection, name: str, slug: str, error: str
+    conn: sqlite3.Connection, city: str, name: str, slug: str, error: str
 ) -> None:
     """Count a failed lookup so an unresolvable buurt stops being retried."""
     conn.execute(
-        "INSERT INTO boundaries (name, slug, attempts, last_error) "
-        "VALUES (?, ?, 1, ?) "
-        "ON CONFLICT (name) DO UPDATE SET attempts = attempts + 1, "
+        "INSERT INTO boundaries (city, name, slug, attempts, last_error) "
+        "VALUES (?, ?, ?, 1, ?) "
+        "ON CONFLICT (city, name) DO UPDATE SET attempts = attempts + 1, "
         "last_error = excluded.last_error",
-        (name, slug, error[:200]),
+        (city, name, slug, error[:200]),
     )
 
 
@@ -565,11 +645,12 @@ def neighbourhoods_needing_boundary(
     interrupted run resumes by simply running again.
     """
     return conn.execute(
-        "SELECT DISTINCT l.neighbourhood AS name FROM listings l "
-        "LEFT JOIN boundaries b ON b.name = l.neighbourhood "
-        "WHERE l.neighbourhood <> '' AND l.delisted_at IS NULL "
+        "SELECT DISTINCT l.city, l.neighbourhood AS name FROM listings l "
+        "LEFT JOIN boundaries b "
+        "  ON b.name = l.neighbourhood AND b.city = l.city "
+        "WHERE l.neighbourhood <> '' AND l.city <> '' AND l.delisted_at IS NULL "
         "  AND b.geometry IS NULL AND COALESCE(b.attempts, 0) < ? "
-        "ORDER BY l.neighbourhood LIMIT ?",
+        "ORDER BY l.city, l.neighbourhood LIMIT ?",
         (MAX_BOUNDARY_ATTEMPTS, -1 if limit is None else limit),
     ).fetchall()
 
@@ -583,10 +664,12 @@ def neighbourhood_shapes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     picks that constant off any row carrying it.
     """
     return conn.execute(
-        "SELECT b.name, b.geometry, MAX(l.neighbourhood_price_m2) AS price_m2 "
-        "FROM boundaries b JOIN listings l ON l.neighbourhood = b.name "
+        "SELECT b.city, b.name, b.geometry, "
+        "       MAX(l.neighbourhood_price_m2) AS price_m2 "
+        "FROM boundaries b "
+        "  JOIN listings l ON l.neighbourhood = b.name AND l.city = b.city "
         "WHERE b.geometry IS NOT NULL "
-        "GROUP BY b.name, b.geometry ORDER BY b.name"
+        "GROUP BY b.city, b.name, b.geometry ORDER BY b.city, b.name"
     ).fetchall()
 
 
@@ -611,8 +694,8 @@ def neighbourhood_price_scale(
         row["p"]
         for row in conn.execute(
             "SELECT MAX(l.neighbourhood_price_m2) p FROM boundaries b "
-            "JOIN listings l ON l.neighbourhood = b.name "
-            "WHERE b.geometry IS NOT NULL GROUP BY b.name ORDER BY p"
+            "JOIN listings l ON l.neighbourhood = b.name AND l.city = b.city "
+            "WHERE b.geometry IS NOT NULL GROUP BY b.city, b.name ORDER BY p"
         )
         if row["p"] is not None
     ]
@@ -655,13 +738,19 @@ def latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def counts(conn: sqlite3.Connection) -> dict[str, int]:
-    row = conn.execute("""
+def counts(conn: sqlite3.Connection, offering_type: str | None = None) -> dict[str, int]:
+    """Cache totals. `offering_type=None` counts everything, for `status`."""
+    scope = "" if offering_type is None else " WHERE offering_type = ?"
+    args = () if offering_type is None else (offering_type,)
+    row = conn.execute(
+        f"""
         SELECT COUNT(*) AS total,
                SUM(delisted_at IS NULL)      AS active,
                SUM(detail_fetched_at IS NOT NULL) AS enriched
-        FROM listings
-    """).fetchone()
+        FROM listings{scope}
+        """,  # noqa: S608
+        args,
+    ).fetchone()
     shapes = conn.execute(
         "SELECT COUNT(*) AS n FROM boundaries WHERE geometry IS NOT NULL"
     ).fetchone()
@@ -673,10 +762,14 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def distinct_neighbourhoods(conn: sqlite3.Connection) -> list[str]:
+def distinct_neighbourhoods(
+    conn: sqlite3.Connection, offering_type: str = BUY
+) -> list[str]:
     rows = conn.execute(
         "SELECT DISTINCT neighbourhood FROM listings "
-        "WHERE neighbourhood <> '' AND delisted_at IS NULL ORDER BY neighbourhood"
+        "WHERE neighbourhood <> '' AND delisted_at IS NULL AND offering_type = ? "
+        "ORDER BY neighbourhood",
+        (offering_type,),
     ).fetchall()
     return [row["neighbourhood"] for row in rows]
 
@@ -703,8 +796,15 @@ DEFAULT_SORT = "newest"
 
 @dataclass(frozen=True, slots=True)
 class Filters:
-    """Everything the browse page can narrow by. All fields optional."""
+    """Everything the browse page can narrow by.
 
+    `offering_type` is the one field that is **not** optional in spirit: it
+    always has a value and `_where` always emits it, because `price` and
+    `price_per_m2` mean different things for buy and rent and a query that
+    forgets to scope them would mis-sort silently rather than fail.
+    """
+
+    offering_type: str = BUY
     q: str = ""
     price_min: int | None = None
     price_max: int | None = None
@@ -733,8 +833,9 @@ price if this house has come down."""
 
 def _where(filters: Filters) -> tuple[str, list[Any]]:
     """Build the WHERE clause. Every value is bound, never interpolated."""
-    clauses: list[str] = []
-    params: list[Any] = []
+    # Always first, and never optional -- see Filters.
+    clauses: list[str] = ["offering_type = ?"]
+    params: list[Any] = [filters.offering_type]
 
     if not filters.include_delisted:
         clauses.append("delisted_at IS NULL")
@@ -766,7 +867,7 @@ def _where(filters: Filters) -> tuple[str, list[Any]]:
         clauses.append("status = ?")
         params.append(filters.status)
 
-    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
+    return " WHERE " + " AND ".join(clauses), params
 
 
 def query_listings(
@@ -804,10 +905,9 @@ def query_map_points(
     *render* are selected; the popup fetches its own card.
     """
     where, params = _where(filters)
-    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
     return conn.execute(
         f"SELECT listing_id, lat, lng, energy_label, price, price_per_m2 "  # noqa: S608
-        f"FROM listings{clause} ORDER BY listing_id LIMIT ?",
+        f"FROM listings{where} AND lat IS NOT NULL ORDER BY listing_id LIMIT ?",
         [*params, limit],
     ).fetchall()
 
@@ -821,9 +921,8 @@ def count_map_points(conn: sqlite3.Connection, filters: Filters) -> int:
     one that admits it.
     """
     where, params = _where(filters)
-    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
     row = conn.execute(
-        f"SELECT COUNT(*) FROM listings{clause}",  # noqa: S608
+        f"SELECT COUNT(*) FROM listings{where} AND lat IS NOT NULL",  # noqa: S608
         params,
     ).fetchone()
     return int(row[0])
@@ -836,10 +935,9 @@ def map_bounds(conn: sqlite3.Connection, filters: Filters) -> tuple[float, ...] 
     downloading the whole GeoJSON a second time just to measure it.
     """
     where, params = _where(filters)
-    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
     row = conn.execute(
         f"SELECT MIN(lng) x1, MIN(lat) y1, MAX(lng) x2, MAX(lat) y2 "  # noqa: S608
-        f"FROM listings{clause}",
+        f"FROM listings{where} AND lat IS NOT NULL",
         params,
     ).fetchone()
     if row is None or row["x1"] is None:
@@ -853,26 +951,32 @@ def count_listings(conn: sqlite3.Connection, filters: Filters) -> int:
     return int(row[0])
 
 
-def price_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Range for the filter sliders, from the data rather than hardcoded."""
+def price_bounds(conn: sqlite3.Connection, offering_type: str = BUY) -> tuple[int, int]:
+    """Range for the filter sliders, from the data rather than hardcoded.
+
+    Scoped, or a cache holding both would offer a slider from 170 to 6 450 000.
+    """
     row = conn.execute(
         "SELECT MIN(price) AS lo, MAX(price) AS hi FROM listings "
-        "WHERE price > 0 AND delisted_at IS NULL"
+        "WHERE price > 0 AND delisted_at IS NULL AND offering_type = ?",
+        (offering_type,),
     ).fetchone()
     return (row["lo"] or 0, row["hi"] or 0)
 
 
-def area_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
+def area_bounds(conn: sqlite3.Connection, offering_type: str = BUY) -> tuple[int, int]:
     row = conn.execute(
         "SELECT MIN(living_area) AS lo, MAX(living_area) AS hi FROM listings "
-        "WHERE living_area > 0 AND delisted_at IS NULL"
+        "WHERE living_area > 0 AND delisted_at IS NULL AND offering_type = ?",
+        (offering_type,),
     ).fetchone()
     return (row["lo"] or 0, row["hi"] or 0)
 
 
-def label_counts(conn: sqlite3.Connection) -> dict[str, int]:
+def label_counts(conn: sqlite3.Connection, offering_type: str = BUY) -> dict[str, int]:
     rows = conn.execute(
         "SELECT energy_label, COUNT(*) AS n FROM listings "
-        "WHERE delisted_at IS NULL GROUP BY energy_label"
+        "WHERE delisted_at IS NULL AND offering_type = ? GROUP BY energy_label",
+        (offering_type,),
     ).fetchall()
     return {row["energy_label"]: row["n"] for row in rows}

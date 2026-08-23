@@ -1,5 +1,42 @@
 {% extends "base.html" %}
-{% block title %}HouseMaster — {{ total }} houses{% endblock %}
+{% block title %}HouseMaster — {{ total }} {{ "rentals" if offering == "rent" else "houses" }}{% endblock %}
+
+{#
+  Filter memory, restored before first paint.
+
+  The URL stays the source of truth: a link someone shared carries filters and
+  must win, so this only fires on a URL with *no* filter parameters at all.
+  `view` and `offering` are properties of the page rather than the filter set,
+  so they survive the redirect and pick the right stored set.
+
+  Pre-paint and `location.replace`: rendering 3 000 houses unfiltered and then
+  swapping would flash, and `assign` would put a dead entry in the history so
+  Back would bounce you forward again.
+#}
+{% block head %}
+<script>
+  (function () {
+    var KEYS = {{ filter_keys | tojson }};
+    var STORE = "housemaster-filters-v1:" + {{ offering | tojson }};
+    try {
+      var here = new URLSearchParams(window.location.search);
+      if (KEYS.some(function (k) { return here.has(k); })) return;
+
+      var saved = new URLSearchParams(localStorage.getItem(STORE) || "");
+      // Nothing worth restoring means no redirect -- which is also what makes
+      // a loop impossible, since the replacement URL always carries a filter.
+      if (!KEYS.some(function (k) { return saved.has(k); })) return;
+
+      ["view", "offering"].forEach(function (k) {
+        if (here.has(k)) saved.set(k, here.get(k));
+      });
+      window.location.replace(window.location.pathname + "?" + saved.toString());
+    } catch (e) {
+      /* private mode: the page simply loads unfiltered */
+    }
+  })();
+</script>
+{% endblock %}
 
 {% block masthead %}
   <span class="meta">
@@ -35,7 +72,7 @@
     </fieldset>
 
     <fieldset>
-      <legend>Asking price</legend>
+      <legend>{{ "Rent per month" if offering == "rent" else "Asking price" }}</legend>
       <div class="pair">
         <input type="number" name="price_min" inputmode="numeric"
                value="{{ filters.price_min or '' }}"

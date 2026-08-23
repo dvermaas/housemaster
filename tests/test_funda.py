@@ -342,6 +342,7 @@ def test_a_single_ring_becomes_a_polygon() -> None:
                 "geographicalArea": {"0": {"type": "polygon", "coordinates": ring}},
             }
         ),
+        "Den Haag",
         "Spoorwijk",
         "spoorwijk",
     )
@@ -361,6 +362,7 @@ def test_several_rings_become_a_multipolygon() -> None:
                 "geographicalArea": {"0": {"coordinates": a}, "1": {"coordinates": b}},
             }
         ),
+        "Den Haag",
         "Laak",
         "laak",
     )
@@ -376,8 +378,71 @@ def test_a_slug_that_missed_returns_none_rather_than_raising() -> None:
     # 404 -- so the areaType is the only way to tell, and a miss is normal.
     assert (
         funda.to_boundary(
-            _area_state({"areaType": "city", "name": "Den Haag"}), "Nowhere", "nowhere"
+            _area_state({"areaType": "city", "name": "Den Haag"}),
+            "Den Haag",
+            "Nowhere",
+            "nowhere",
         )
         is None
     )
-    assert funda.to_boundary(_area_state(None), "Nowhere", "nowhere") is None
+    assert funda.to_boundary(_area_state(None), "Den Haag", "Nowhere", "nowhere") is None
+
+
+# --- buy vs rent -----------------------------------------------------------
+
+
+def test_a_purchase_reads_the_selling_price() -> None:
+    listing = to_listing(
+        {
+            "offering_type": ["buy"],
+            "price": {
+                "selling_price": [575000],
+                "selling_price_condition": "kosten_koper",
+            },
+        }
+    )
+    assert (listing.offering_type, listing.price) == ("buy", 575000)
+    assert listing.price_condition == "kosten_koper"
+
+
+def test_a_rental_reads_the_rent_price() -> None:
+    # funda names the two cases differently, so reading `selling_price` off a
+    # rental silently yields None -- which is what happened before this split.
+    listing = to_listing(
+        {
+            "offering_type": ["rent"],
+            "price": {"rent_price": [1725], "rent_price_condition": "per_month"},
+        }
+    )
+    assert (listing.offering_type, listing.price) == ("rent", 1725)
+    assert listing.price_condition == "per_month"
+
+
+def test_a_yearly_rent_is_normalised_to_monthly() -> None:
+    """One listing in sixty is quoted per year (they are parking spaces).
+
+    Leaving both scales in one column would make every rental comparison
+    silently wrong; funda's own wording survives verbatim in the kenmerken.
+    """
+    listing = to_listing(
+        {
+            "offering_type": ["rent"],
+            "price": {"rent_price": [18000], "rent_price_condition": "per_year"},
+        }
+    )
+    assert listing.price == 1500
+    assert listing.price_condition == "per_month"
+
+
+def test_offering_type_defaults_to_buy() -> None:
+    # An absent or unfamiliar offering_type must not be guessed as rent.
+    assert to_listing({}).offering_type == "buy"
+    assert to_listing({"offering_type": []}).offering_type == "buy"
+
+
+def test_a_city_slug_follows_the_same_rule_as_a_buurt_slug() -> None:
+    # funda writes Rijswijk (ZH) as rijswijk-zh, which the buurt rule already
+    # produces -- so fetch_boundary can slugify both halves the same way.
+    assert funda.neighbourhood_slug("Rijswijk (ZH)") == "rijswijk-zh"
+    assert funda.neighbourhood_slug("Den Haag") == "den-haag"
+    assert funda.neighbourhood_slug("Voorburg") == "voorburg"

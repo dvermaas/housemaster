@@ -201,9 +201,9 @@ def _outline(
 
     missed = 0
     for index, row in enumerate(pending, start=1):
-        name = row["name"]
+        city, name = row["city"], row["name"]
         try:
-            boundary = fetch_boundary(name)
+            boundary = fetch_boundary(city, name)
         except BlockedError as exc:
             report.error = str(exc)
             progress("blocked during boundary pass -- stopping")
@@ -219,7 +219,9 @@ def _outline(
                 report.boundaries_fetched += 1
             else:
                 missed += 1
-                db.record_boundary_miss(conn, name, neighbourhood_slug(name), reason)
+                db.record_boundary_miss(
+                    conn, city, name, neighbourhood_slug(name), reason
+                )
 
         if index % 25 == 0:
             progress(f"  {index}/{len(pending)} outlines")

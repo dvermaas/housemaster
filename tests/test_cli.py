@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -257,3 +259,80 @@ def test_fetch_url_overrides_the_tracked_set_without_saving_it(
         assert [r["url"] for r in db.list_searches(conn)] == [FUNDA_URL]
     finally:
         conn.close()
+
+
+# --- the fetch lock --------------------------------------------------------
+
+
+def _stub_pipeline(_conn: object, _options: Any, **_kw: object) -> FetchReport:
+    return FetchReport(search_url="x")
+
+
+def test_a_second_fetch_refuses_while_one_is_running(
+    cache: Path, stub_page: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent fetches do not corrupt anything -- SQLite serialises the
+    writes -- but they contend for the writer lock until one gives up mid-run,
+    and they ask funda for the same pages twice."""
+    cli.main(["add", FUNDA_URL])
+
+    seen: list[int] = []
+
+    def fake_run(_conn: object, _options: Any, **_kw: object) -> FetchReport:
+        # Re-entering while the lock is held is what a manual run during the
+        # scheduled one looks like.
+        seen.append(cli.main(["fetch"]))
+        return FetchReport(search_url="x")
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run)
+    assert cli.main(["fetch"]) == cli.EXIT_OK
+    assert seen == [cli.EXIT_ERROR]
+
+
+def test_the_lock_is_released_afterwards(
+    cache: Path, stub_page: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli.main(["add", FUNDA_URL])
+    monkeypatch.setattr(cli, "run_pipeline", _stub_pipeline)
+    assert cli.main(["fetch"]) == cli.EXIT_OK
+    assert cli.main(["fetch"]) == cli.EXIT_OK
+    assert list(cache.parent.glob("*.fetch-lock")) == []
+
+
+def test_a_stale_lock_does_not_wedge_the_schedule(
+    cache: Path, stub_page: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A killed run leaves the file behind; without expiry every nightly fetch
+    # from then on would refuse.
+    cli.main(["add", FUNDA_URL])
+    lock = cache.parent / f"{cache.name}.fetch-lock"
+    lock.write_text("stale", encoding="utf-8")
+    old = time.time() - cli.STALE_LOCK_AFTER - 60
+    os.utime(lock, (old, old))
+
+    monkeypatch.setattr(cli, "run_pipeline", _stub_pipeline)
+    assert cli.main(["fetch"]) == cli.EXIT_OK
+
+
+# --- the daily schedule ----------------------------------------------------
+
+
+def test_schedule_rejects_a_bad_time(cache: Path) -> None:
+    assert cli.main(["schedule", "--at", "half six"]) == cli.EXIT_ERROR
+
+
+def test_schedule_rejects_an_unknown_zone(cache: Path) -> None:
+    assert cli.main(["schedule", "--tz", "Mars/Olympus"]) == cli.EXIT_ERROR
+
+
+def test_a_failing_fetch_does_not_kill_the_schedule(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nightly job has to still be there tomorrow."""
+
+    def boom(_args: object) -> int:
+        raise RuntimeError("funda fell over")
+
+    monkeypatch.setattr(cli, "run_fetch", boom)
+    args = cli.build_parser().parse_args(["schedule"])
+    assert cli._fetch_once(args) == cli.EXIT_ERROR

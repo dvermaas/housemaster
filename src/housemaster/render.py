@@ -161,7 +161,7 @@ def render_status(
         lines.append("searches")
         for row in searches:
             label = f"  {row['label']}" if row["label"] else ""
-            lines.append(f"  [{row['search_id']}]{label}")
+            lines.append(f"  [{row['search_id']}]  {row['offering_type']}{label}")
             lines.append(f"      {row['url']}")
     else:
         lines.append("")

@@ -34,6 +34,22 @@ GALLERY_PREVIEW = 5
 VIEWS = ("grid", "map")
 """Two ways to look at the same filtered set. The filter rail is shared."""
 
+# Price means euros to buy and euros-per-month to rent, so the two are never
+# shown together -- this is a mode, not a filter.
+PRICE_BOUND_ARGS = ("price_min", "price_max")
+
+FILTER_KEYS = (
+    "q", "price_min", "price_max", "area_min", "area_max",
+    "rooms_min", "beds_min", "label", "hood", "status", "delisted", "sort",
+)  # fmt: skip
+"""Query parameters that narrow the result set, as opposed to `view`,
+`offering` and `page`, which are properties of the *page*.
+
+Rendered into the markup so the browser-side filter memory reads one
+definition rather than keeping its own copy in sync -- a key that silently fell
+out of step here would be stored and never restored, or vice versa.
+"""
+
 
 def _conn() -> sqlite3.Connection:
     from housemaster.web import get_conn  # noqa: PLC0415 - avoids a circular import
@@ -50,8 +66,14 @@ def _int(name: str) -> int | None:
         return None
 
 
+def current_offering() -> str:
+    requested = (request.args.get("offering") or "").strip()
+    return requested if requested in db.OFFERING_TYPES else db.BUY
+
+
 def filters_from_args() -> db.Filters:
     return db.Filters(
+        offering_type=current_offering(),
         q=(request.args.get("q") or "").strip(),
         price_min=_int("price_min"),
         price_max=_int("price_max"),
@@ -83,12 +105,13 @@ def _is_partial() -> bool:
 
 def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
     filters = filters_from_args()
+    offering = filters.offering_type
     page = max(_int("page") or 1, 1)
     listings = db.query_listings(
         conn, filters, limit=PER_PAGE, offset=(page - 1) * PER_PAGE
     )
     total = db.count_listings(conn, filters)
-    area_lo, area_hi = db.area_bounds(conn)
+    area_lo, area_hi = db.area_bounds(conn, offering)
 
     # Built here rather than in the template: carrying the current filters over
     # to the next page is URL work, not markup.
@@ -117,12 +140,31 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
         # The outlines are a context layer, not part of the filtered set, so
         # this URL is constant and the map never has to reload it.
         "shapes_url": url_for("browse.neighbourhoods_geojson"),
+        "offering": offering,
+        # Switching mode drops the price bounds: a 0-1800 rent range is
+        # meaningless for buying and 250k-350k is meaningless for renting.
+        "offering_url": {
+            other: url_for(
+                "browse.index",
+                **(
+                    {
+                        k: v
+                        for k, v in request.args.to_dict(flat=False).items()
+                        if k not in PRICE_BOUND_ARGS and k != "page"
+                    }
+                    | {"offering": [other]}
+                ),
+            )
+            for other in db.OFFERING_TYPES
+        },
         "hood_scale": db.neighbourhood_price_scale(conn) if view == "map" else None,
         # Clears every filter but keeps the view: "clear all filters" should
         # not also mean "and put me back on the grid". Omitted for the default
         # so the clean case stays a bare `/`.
         "reset_url": url_for(
-            "browse.index", **({"view": view} if view != "grid" else {})
+            "browse.index",
+            **({"view": view} if view != "grid" else {}),
+            **({"offering": offering} if offering != db.BUY else {}),
         ),
         "other_view": "grid" if view == "map" else "map",
         "view_url": url_for(
@@ -137,6 +179,10 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
         # COUNT over the same predicate.
         "mapped": db.count_map_points(conn, filters) if view == "map" else None,
         "map_limit": db.MAX_MAP_POINTS,
+        "filter_keys": FILTER_KEYS,
+        # So the empty state can tell "nothing matched" apart from "nothing
+        # fetched yet" -- the fragment is rendered without the full page context.
+        "counts": db.counts(conn, offering),
         "has_boundaries": db.counts(conn)["boundaries"] if view == "map" else 0,
         "page": page,
         "has_more": page * PER_PAGE < total,
@@ -153,15 +199,15 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
 def index() -> str:
     conn = _conn()
     context = _page_context(conn)
+    offering = context["offering"]
     if _is_partial():
         return render_template("_results.html", **context)
     return render_template(
         "index.html",
-        neighbourhoods=db.distinct_neighbourhoods(conn),
-        label_counts=db.label_counts(conn),
+        neighbourhoods=db.distinct_neighbourhoods(conn, offering),
+        label_counts=db.label_counts(conn, offering),
         energy_scale=ENERGY_SCALE,
-        price_range=db.price_bounds(conn),
-        counts=db.counts(conn),
+        price_range=db.price_bounds(conn, offering),
         last_run=db.latest_run(conn),
         **context,
     )

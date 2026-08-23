@@ -42,6 +42,16 @@ def status_label(status: str | None) -> str:
     return key.replace("_", " ").capitalize()
 
 
+def per_m2(offering_type: str | None) -> str:
+    """Unit suffix for a price-per-m2 figure.
+
+    Rent is stored monthly, so an unqualified "EUR 19/m2" next to a purchase
+    page's "EUR 5.629/m2" reads as an absurd bargain rather than a monthly rate.
+    The unit has to travel with the number.
+    """
+    return "/m² p/mnd" if offering_type == "rent" else "/m²"
+
+
 def compact(value: int | None) -> str:
     """Thousands separator without a currency symbol, for axis-style figures."""
     return f"{value:,}".replace(",", ".") if value else "-"

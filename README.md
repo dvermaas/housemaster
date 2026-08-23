@@ -54,6 +54,33 @@ housemaster status [--db PATH]      # cache contents, tracked searches, last run
 housemaster search [...]            # live, no database -- the original probe
 ```
 
+### Buy and rent
+
+Both live in one cache, and the UI never mixes them — a **Buy / Rent** switch
+above the results changes mode. `price` means euros to buy and euros **per
+month** to rent, so switching drops the price range (a 0–1800 rent filter is
+meaningless for buying) while keeping every other filter.
+
+```bash
+AREA='den-haag,rijswijk-zh,voorburg'
+housemaster add "https://www.funda.nl/zoeken/koop?selected_area=$AREA&floor_area=50-"
+housemaster add "https://www.funda.nl/zoeken/huur?selected_area=$AREA&floor_area=50-"
+```
+
+`selected_area` takes a comma-separated list, so one search can span several
+municipalities. Note `rijswijk-zh` — plain `rijswijk` is ambiguous with the one
+in Gelderland and resolves to nothing.
+
+`add` reads which side a search tracks from its path (`koop` / `huur`), but a
+listing classifies itself from its own payload — the same property can be listed
+both ways, as two listings.
+
+Rentals are a much smaller market: 327 at 50m²+ against 3 377 for sale.
+
+One honest limitation — the buurt choropleth is a **purchase** €/m² map. funda's
+`localInsights` returns purchase prices even on a rental page, so under a rental
+view it is geography and context, not a rent benchmark.
+
 ### Tracked searches
 
 `fetch` walks **every search you have added**, so one cache can follow several
@@ -101,6 +128,53 @@ Photo ids arrive free with step 1 and are stored as they come; nothing is
 downloaded. Steps 2 and 3 are driven by what the *database* lacks, not by what
 the run happened to see, so an interrupted fetch is resumed by simply running it
 again. There is no checkpoint state and no `--resume` flag.
+
+## Docker
+
+```bash
+cp .env.example .env      # paste your Cloudflare tunnel token
+docker compose up -d      # web + tunnel
+docker compose run --rm cli add 'https://www.funda.nl/zoeken/koop?selected_area=den-haag&floor_area=50-'
+docker compose run --rm cli fetch
+```
+
+`cli` runs any CLI verb against the same cache — `add`, `fetch`, `rm`, `status`.
+
+A `scheduler` sidecar fetches **every morning at 06:00 Europe/Amsterdam** and
+sleeps the rest of the time; change `--at` / `--tz` in `compose.yaml`.
+`docker compose logs scheduler` shows what last night's run found.
+
+Two things make that low-maintenance. A missed run needs no catching up — every
+pass is driven by what the cache lacks, so a machine that was off overnight just
+picks up where it left off. And the run holds a lock beside the database, so a
+manual `cli fetch` during the nightly one refuses instead of competing for the
+SQLite writer; a killed run's lock expires after six hours rather than wedging
+the schedule.
+
+**Nothing is published to the internet by the host.** `cloudflared` dials *out*
+to Cloudflare and forwards to `web` over the compose network, so there is no
+inbound firewall rule and the app is never directly reachable. Point the
+tunnel's Public Hostname at `http://web:8765`. The compose file does bind
+`127.0.0.1:8765` for a local look; delete that line to close it off entirely.
+
+The image is **~140 MB on Alpine**, which is only possible because `curl_cffi`
+ships musllinux wheels for CPython 3.14 — otherwise curl-impersonate would have
+to be compiled from source. `UV_NO_BUILD` on the dependency layer makes that a
+loud build failure rather than a silent hour-long compile if a wheel ever
+disappears.
+
+It serves with **gunicorn**, not Werkzeug's development server, which says
+itself that it is not for production. Gunicorn is an optional extra
+(`uv sync --extra serve`), so the core runtime surface stays `curl_cffi` +
+`flask`.
+
+`web` and `cli` share one volume and one SQLite file — WAL is what makes that
+safe, with `web` reading read-only while a fetch writes. The web container
+creates the file at start-up if the volume is new, so a first `up` serves an
+empty cache rather than crash-looping on a database that is not there yet.
+
+The host port is `8766`, not 8765, so it cannot collide with a `housemaster
+serve` running locally. The tunnel does not use it at all.
 
 ## Development
 
@@ -332,6 +406,12 @@ The two webfonts stay vendored in `web/static/fonts/`. SRI does not cover
 `@font-face`, so a CDN font would be the one unverifiable request on the page,
 and glyph data is not executable anyway. Our own CSS and JS are served locally
 for the same reason there is no build step: they are the app.
+
+**Your filters are remembered.** Set a €350 000 ceiling, come back tomorrow, and
+it is still there — stored per side of the market, so a buy ceiling and a rent
+ceiling never contaminate each other. A shared link always wins over what you
+had saved, and clearing filters forgets them rather than restoring them on the
+next visit.
 
 **Clear all filters** keeps you where you are — clearing filters on the map
 leaves you on the map, since the view is a property of the page rather than of

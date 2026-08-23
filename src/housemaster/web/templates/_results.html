@@ -1,5 +1,7 @@
 {# Swapped whole by htmx; also included directly on first render. #}
-<main id="results" data-view="{{ view }}" data-geojson="{{ geojson_url }}"
+<main id="results" data-view="{{ view }}" data-offering="{{ offering }}"
+      data-filter-keys="{{ filter_keys | join(",") }}"
+      data-geojson="{{ geojson_url }}"
       data-shapes="{{ shapes_url }}"
       {% if hood_scale %}data-hood-scale="{{ hood_scale | join(",") }}"{% endif %}
       {% if bounds %}data-bounds="{{ bounds | join(",") }}"{% endif %}>
@@ -7,9 +9,27 @@
      filter form must carry the current view or changing a filter while on the
      map silently drops you back to the grid. #}
   <input type="hidden" name="view" value="{{ view }}">
+  {# Same reasoning, and more load-bearing: `price` means euros to buy and
+     euros-per-month to rent, so a stale value here would filter one set with
+     the other's numbers. #}
+  <input type="hidden" name="offering" value="{{ offering }}">
 
   <div class="results-head">
-    <span class="count"><b class="fig">{{ total }}</b> houses</span>
+    {# The mode switch, not a filter: it changes what `price` *means*, so it
+       sits above the rail rather than in it. Links, so both halves work with
+       JavaScript off and can be opened in a new tab. #}
+    <div class="offering" role="group" aria-label="Buy or rent">
+      {% for kind, word in (("buy", "Buy"), ("rent", "Rent")) %}
+        <a class="offering-opt {{ 'on' if offering == kind }}"
+           href="{{ offering_url[kind] }}"
+           {% if offering == kind %}aria-current="true"{% endif %}
+           hx-get="{{ offering_url[kind] }}" hx-target="#results"
+           hx-select="#results" hx-swap="outerHTML" hx-push-url="true">{{ word }}</a>
+      {% endfor %}
+    </div>
+
+    <span class="count"><b class="fig">{{ total }}</b>
+      {{ "rentals" if offering == "rent" else "houses" }}</span>
 
     {# A link, not a form control: the view is a property of the page, and this
        way it works with JavaScript off and can be opened in a new tab. #}
@@ -43,8 +63,19 @@
     </div>
   {% else %}
     <div class="empty">
-      <h2>No houses match these filters.</h2>
-      <p>Widen the price range, or clear a filter to see more.</p>
+      {% if counts is defined and counts.total == 0 %}
+        {# An empty cache is not a filter that matched nothing, and saying so
+           sends people to widen a range that was never the problem. #}
+        <h2>The cache is empty.</h2>
+        <p>Track a search with <code>housemaster add &lt;url&gt;</code>,
+           then run <code>housemaster fetch</code> to populate it.</p>
+      {% else %}
+      <h2>No {{ "rentals" if offering == "rent" else "houses" }} match these
+        filters.</h2>
+      {# Filters can arrive from a previous visit, so the way out belongs here
+         rather than only at the foot of the rail. #}
+      <p>Widen the range, or <a href="{{ reset_url }}">clear all filters</a>.</p>
+      {% endif %}
     </div>
   {% endif %}
 </main>

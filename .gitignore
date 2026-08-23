@@ -19,3 +19,9 @@ data/
 # Editors
 .idea/
 .vscode/
+
+# Secrets
+.env
+
+# Fetch lock (lives beside the cache)
+*.fetch-lock

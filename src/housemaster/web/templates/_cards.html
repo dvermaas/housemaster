@@ -35,7 +35,7 @@
         {% if house.price_was %}
           <span class="price-was">{{ house.price_was | euro }}</span>
         {% endif %}
-        <span class="ppm2">{{ house.price_per_m2 | euro }}/m²</span>
+        <span class="ppm2">{{ house.price_per_m2 | euro }}{{ house.offering_type | per_m2 }}</span>
       </div>
 
       <div class="specs">

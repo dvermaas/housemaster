@@ -1,0 +1,56 @@
+# HouseMaster behind a Cloudflare tunnel.
+#
+# Nothing is published to the internet: cloudflared dials *out* to Cloudflare
+# and reaches the app over this network, so the host needs no inbound rule.
+
+services:
+  web:
+    build: .
+    image: housemaster:latest
+    restart: unless-stopped
+    volumes:
+      - cache:/data
+    # Host access only, and 8766 because `housemaster serve` already uses 8765.
+    # The tunnel does not go through this -- delete the two lines to close it.
+    ports:
+      - "127.0.0.1:8766:8765"
+
+  # Every CLI verb, against the same cache:
+  #   docker compose run --rm cli add '<funda search url>'
+  #   docker compose run --rm cli fetch
+  #   docker compose run --rm cli status
+  cli:
+    build: .
+    image: housemaster:latest
+    profiles: [cli]
+    volumes:
+      - cache:/data
+    entrypoint: [housemaster]
+
+  # Fetches once a day and otherwise sleeps. Nothing to catch up if the machine
+  # was off: every pass is driven by what the cache lacks, not by a calendar.
+  scheduler:
+    build: .
+    image: housemaster:latest
+    restart: unless-stopped
+    volumes:
+      - cache:/data
+    entrypoint: [housemaster]
+    command: [schedule, --at, "06:00", --tz, Europe/Amsterdam]
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on: [web]
+    # In Cloudflare, point this tunnel's Public Hostname at http://web:8765
+    # -- "web" is the service below, NOT localhost, which inside this container
+    # would be cloudflared itself.
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+
+volumes:
+  cache:
