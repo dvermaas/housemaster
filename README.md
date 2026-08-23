@@ -27,12 +27,13 @@ Working end to end: scrape into a local cache, then browse and filter it.
 
 ```bash
 uv sync
-uv run housemaster fetch            # scrape the target search into ./data
+uv run housemaster add 'https://www.funda.nl/zoeken/koop?selected_area=den-haag&floor_area=50-'
+uv run housemaster fetch            # scrape every tracked search into ./data
 uv run housemaster serve            # browse it at http://127.0.0.1:8765
 ```
 
-The first `fetch` takes a few minutes (35 search pages plus ~520 detail pages)
-and leaves a cache of a couple of megabytes. Every run after that takes about
+The first `fetch` on the search above takes about half an hour (185 search pages
+plus ~2 800 detail pages and 105 buurt outlines) and leaves a ~35 MB cache. Every run after that takes about
 30 seconds, because a detail page is fetched **once per house, ever**. Photos
 are never fetched at all — they are hotlinked from funda's CDN. To try it
 without the wait:
@@ -44,12 +45,37 @@ uv run housemaster fetch --max-pages 2 --max-details 5
 ### Commands
 
 ```bash
+housemaster add URL [--name NAME] [--no-check] [--db PATH]
+housemaster rm ID [--db PATH]       # ids come from `status`
 housemaster fetch [--url URL] [--db PATH] [--max-pages N] [--max-details N]
                   [--no-detail] [--no-boundaries] [--pace 0.4] [--quiet]
 housemaster serve [--db PATH] [--host 127.0.0.1] [--port 8765] [--debug]
-housemaster status [--db PATH]      # what the cache holds, and the last run
+housemaster status [--db PATH]      # cache contents, tracked searches, last run
 housemaster search [...]            # live, no database -- the original probe
 ```
+
+### Tracked searches
+
+`fetch` walks **every search you have added**, so one cache can follow several
+at once — a wide net for the map plus a narrow one you actually shortlist from.
+A house found by more than one search is stored once.
+
+```bash
+housemaster add 'https://www.funda.nl/zoeken/koop?selected_area=den-haag&floor_area=50-' --name 'wide'
+housemaster add 'https://www.funda.nl/zoeken/koop?selected_area=delft&floor_area=80-'
+housemaster status                  # lists them with their ids
+housemaster rm 2
+```
+
+`add` makes one request to confirm the URL resolves and tell you what it holds
+(`2773 listings, 185 pages`), so a typo fails immediately rather than silently
+returning nothing forever. `--no-check` skips it.
+
+`rm` stops tracking a search but **keeps its houses** — they delist through the
+normal two-strike rule once nothing returns them, which preserves their price
+history in case they are still live and simply moved out of scope.
+
+`fetch --url ...` runs an ad-hoc search without adding it to the tracked set.
 
 `search` is unchanged and still hits funda directly, printing text, JSON or CSV.
 It is the quick way to check the extraction path without touching the cache.
@@ -60,9 +86,11 @@ to keep beside it.
 
 ### What `fetch` does
 
-1. Walks the search pages, upserting every house it sees. **Price and status are
-   refreshed on every run**, and any change appends a row to `price_history` —
-   so price drops and "under offer" transitions become visible.
+1. Walks **every tracked search**, upserting every house it sees. **Price and
+   status are refreshed on every run**, and any change appends a row to
+   `price_history` — so price drops and "under offer" transitions become
+   visible. Delisting reconciles against the *union* of everything seen, so one
+   search never marks another's houses as gone.
 2. Fetches a detail page **only for houses it has never enriched**, adding the
    description, all nine kenmerken groups, coordinates and neighbourhood stats.
 

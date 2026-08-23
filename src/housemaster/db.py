@@ -188,10 +188,30 @@ def _migration_003_boundaries(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_004_searches(conn: sqlite3.Connection) -> None:
+    """The set of funda searches this cache tracks.
+
+    `fetch` walks all of them, so a house can be found by more than one. Nothing
+    records *which* search found a house: presence is a property of the union,
+    which is exactly what the delisting reconciliation needs. Anything finer
+    would have to be maintained per search and would make "gone" ambiguous.
+    """
+    conn.executescript("""
+        CREATE TABLE searches (
+            search_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            url         TEXT NOT NULL UNIQUE,
+            label       TEXT,
+            added_at    TEXT NOT NULL,
+            last_run_at TEXT
+        ) STRICT;
+    """)
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001_initial,
     _migration_002_drop_photo_storage,
     _migration_003_boundaries,
+    _migration_004_searches,
 )
 
 
@@ -403,6 +423,58 @@ def reconcile_presence(
         (now, threshold),
     )
     return cursor.rowcount
+
+
+# --- tracked searches ------------------------------------------------------
+
+
+def add_search(
+    conn: sqlite3.Connection, url: str, label: str | None = None
+) -> tuple[int, bool]:
+    """Track a search URL. Returns `(search_id, was_new)`.
+
+    Idempotent on the URL, so re-adding one is a no-op that reports the existing
+    id rather than an error -- the useful outcome either way is "this is tracked".
+    """
+    existing = conn.execute(
+        "SELECT search_id FROM searches WHERE url = ?", (url,)
+    ).fetchone()
+    if existing is not None:
+        return int(existing["search_id"]), False
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO searches (url, label, added_at) VALUES (?, ?, ?)",
+            (url, label, utcnow()),
+        )
+    return int(cursor.lastrowid or 0), True
+
+
+def remove_search(conn: sqlite3.Connection, search_id: int) -> str | None:
+    """Stop tracking a search. Returns the URL removed, or None if unknown.
+
+    Listings it found are **kept**. They stop being seen, so the normal
+    two-strike reconciliation delists them -- which is what `delisted_at` has
+    always meant: "stopped matching any tracked search", not "sold".
+    """
+    row = conn.execute(
+        "SELECT url FROM searches WHERE search_id = ?", (search_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    with conn:
+        conn.execute("DELETE FROM searches WHERE search_id = ?", (search_id,))
+    return str(row["url"])
+
+
+def list_searches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM searches ORDER BY search_id").fetchall()
+
+
+def mark_search_run(conn: sqlite3.Connection, search_id: int, now: str) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE searches SET last_run_at = ? WHERE search_id = ?", (now, search_id)
+        )
 
 
 def save_boundary(

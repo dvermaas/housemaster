@@ -21,8 +21,11 @@ uv sync                                # install/refresh .venv; installs the pac
 uv add <pkg>                           # runtime dependency
 uv add --dev <pkg>                     # dev dependency (goes to [dependency-groups].dev)
 
-uv run housemaster fetch               # scrape into ./data (first run ~4 min)
+uv run housemaster add <url>           # track a funda search
+uv run housemaster rm <id>             # stop tracking one (ids come from `status`)
+uv run housemaster fetch               # scrape EVERY tracked search into ./data
 uv run housemaster fetch --max-pages 2 --max-details 5
+uv run housemaster fetch --url <url>   # ad-hoc, bypasses the tracked set
 uv run housemaster serve               # web UI on http://127.0.0.1:8765
 uv run housemaster status              # what the cache holds
 uv run housemaster search              # live, no database -- the original probe
@@ -78,12 +81,18 @@ web      <- cli                   never fetches
 - `funda.py` — all funda knowledge: `fetch_html`, `extract_state`, `to_listing`, `to_detail`, `fetch_search_page`, `fetch_detail`, plus `neighbourhood_slug` / `fetch_boundary` for buurt outlines. Knows nothing about storage or output.
 - `db.py` — schema, `MIGRATIONS`, upserts, `Filters` + `query_listings`. Pure SQLite.
 - `photos.py` — `photo_url` and the CDN width ladder. **Zero imports**, pinned by a test: the web app depends on it, so it must stay unable to reach anything.
-- `pipeline.py` — `run_fetch`: sweep, then `_enrich` (detail pages), then `_outline` (buurt boundaries). Never prints; takes a `progress` callback.
+- `pipeline.py` — `run_fetch`: sweep **every tracked search**, then `_enrich` (detail pages), then `_outline` (buurt boundaries). Never prints; takes a `progress` callback.
 - `render.py`, `cli.py`, `web/` — output formatting, entry point, Flask app.
 
 Search state lives at `state["pinia"]["search"]` (`listings`, `totalListingsCount`, `criteria`, `aggregations`); detail-page state at `state["data"]["cachedListingData_nl"]`, with neighbourhood stats under a `localInsights-<city>/<hood>` key that must be found by prefix. Pagination is `&search_result=N`, 15 per page.
 
 Errors derive from `FundaError`: `BlockedError` (bot wall) and `PayloadError` (page loaded, shape unexpected). The CLI catches `FundaError` and returns exit 1.
+
+### Tracked searches
+
+`searches` (migration 004) holds the set of funda search URLs the cache follows. `fetch` with no `--url` walks all of them; `--url` is an ad-hoc override that is *not* saved. `add` does one live request to confirm the URL resolves and report what it holds — `--no-check` skips it. `rm <id>` stops tracking but **keeps the houses**: they delist through the normal two-strike reconciliation, which is what `delisted_at` has always meant ("stopped matching any tracked search", not "sold"). Deleting listings on `rm` would throw away price history for houses that may still be live.
+
+`status` is also the listing — `rm` takes the ids it prints.
 
 ### The trap: blocks return HTTP 200
 
@@ -100,6 +109,8 @@ Passing the wall depends only on the TLS/JA3 fingerprint, so every request must 
 - Three id spaces on one listing: `globalId` (the primary key, and what search results call `id`), `tinyId` (the number in the detail URL), and a third in `friendlyUrlSlug`. Key on `globalId`; never join on the URL number.
 - `price_per_m2` is a **STORED** generated column — virtual ones cannot be indexed, and it is a sort key.
 - **Boundaries are keyed on the buurt *name***, because that is what a listing carries — funda never gives us a buurt identifier. The slug is derived (`neighbourhood_slug`) and is therefore a column, not the key.
+- **Delisting reconciles against the UNION of every tracked search**, never per search. `run_fetch` accumulates one `seen` set across all of them and reconciles once at the end. Reconciling inside the per-search loop would have each sweep delist every *other* search's houses — a silent, total data-corruption bug. `report.complete` likewise means "every page of every search was walked"; one capped or blocked search makes the whole run partial.
+- **Nothing records which search found a house.** Presence is a property of the union, which is exactly what reconciliation needs; anything finer would have to be maintained per search and would make "gone" ambiguous.
 
 ## Photos
 

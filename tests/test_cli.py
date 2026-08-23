@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from housemaster import cli
+from housemaster import cli, db
 from housemaster.funda import BlockedError
-from housemaster.models import SearchPage
+from housemaster.models import FetchReport, SearchPage
 
 from .test_models import make_listing
 
@@ -123,3 +124,136 @@ def test_bad_format_choice_is_rejected() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["search", "--format", "xml"])
     assert excinfo.value.code == 2
+
+
+# --- tracking searches -----------------------------------------------------
+
+FUNDA_URL = "https://www.funda.nl/zoeken/koop?selected_area=den-haag&floor_area=50-"
+
+
+@pytest.fixture
+def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "t.db"
+    monkeypatch.setenv("HOUSEMASTER_DB", str(path))
+    return path
+
+
+def test_add_tracks_a_search(
+    cache: Path, stub_page: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["add", FUNDA_URL]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "[1]" in out
+    assert FUNDA_URL in out
+    conn = db.connect(cache, read_only=True)
+    try:
+        assert [r["url"] for r in db.list_searches(conn)] == [FUNDA_URL]
+    finally:
+        conn.close()
+
+
+def test_add_checks_the_url_resolves(
+    cache: Path, stub_page: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The check is one request and it reports what the search holds.
+    cli.main(["add", FUNDA_URL])
+    assert "521 listings" in capsys.readouterr().out
+    assert stub_page["url"] == FUNDA_URL
+
+
+def test_add_refuses_a_non_funda_url(cache: Path) -> None:
+    assert cli.main(["add", "https://example.com/houses"]) == cli.EXIT_ERROR
+
+
+def test_add_can_skip_the_check(cache: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("should not have been fetched")
+
+    monkeypatch.setattr(cli, "fetch_search_page", refuse)
+    assert cli.main(["add", FUNDA_URL, "--no-check"]) == cli.EXIT_OK
+
+
+def test_adding_twice_does_not_duplicate(cache: Path, stub_page: dict[str, Any]) -> None:
+    cli.main(["add", FUNDA_URL])
+    cli.main(["add", FUNDA_URL])
+    conn = db.connect(cache, read_only=True)
+    try:
+        assert len(db.list_searches(conn)) == 1
+    finally:
+        conn.close()
+
+
+def test_rm_removes_by_the_id_status_shows(
+    cache: Path, stub_page: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["add", FUNDA_URL])
+    capsys.readouterr()
+    assert cli.main(["rm", "1"]) == cli.EXIT_OK
+    assert "removed" in capsys.readouterr().out
+    conn = db.connect(cache, read_only=True)
+    try:
+        assert db.list_searches(conn) == []
+    finally:
+        conn.close()
+
+
+def test_rm_on_an_unknown_id_is_an_error(cache: Path, stub_page: dict[str, Any]) -> None:
+    cli.main(["add", FUNDA_URL])
+    assert cli.main(["rm", "42"]) == cli.EXIT_ERROR
+
+
+def test_status_lists_the_tracked_searches(
+    cache: Path, stub_page: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["add", FUNDA_URL, "--name", "Den Haag 50m2+"])
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "[1]" in out
+    assert "Den Haag 50m2+" in out
+    assert FUNDA_URL in out
+
+
+def test_fetch_without_any_tracked_search_explains_itself(
+    cache: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["fetch"]) == cli.EXIT_ERROR
+    assert "housemaster add" in capsys.readouterr().err
+
+
+def test_fetch_walks_every_tracked_search(
+    cache: Path, stub_page: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli.main(["add", FUNDA_URL])
+    cli.main(["add", FUNDA_URL + "&rooms=3"])
+
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run(_conn: object, options: Any, **_kw: object) -> FetchReport:
+        seen.append(options.search_urls)
+        return FetchReport(search_url="x")
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run)
+    assert cli.main(["fetch"]) == cli.EXIT_OK
+    assert seen == [(FUNDA_URL, FUNDA_URL + "&rooms=3")]
+
+
+def test_fetch_url_overrides_the_tracked_set_without_saving_it(
+    cache: Path, stub_page: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli.main(["add", FUNDA_URL])
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run(_conn: object, options: Any, **_kw: object) -> FetchReport:
+        seen.append(options.search_urls)
+        return FetchReport(search_url="x")
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run)
+    cli.main(["fetch", "--url", "https://example.test/adhoc"])
+    assert seen == [("https://example.test/adhoc",)]
+
+    conn = db.connect(cache, read_only=True)
+    try:
+        assert [r["url"] for r in db.list_searches(conn)] == [FUNDA_URL]
+    finally:
+        conn.close()

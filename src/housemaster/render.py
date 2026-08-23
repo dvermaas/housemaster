@@ -10,6 +10,7 @@ import csv
 import io
 import json
 from collections.abc import Iterable, Sequence
+from typing import Any
 
 from housemaster.models import FetchReport, Listing, SearchPage
 
@@ -138,8 +139,16 @@ def render_fetch_report(report: FetchReport, counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
-def render_status(db_path: str, counts: dict[str, int], run: object | None) -> str:
-    """Summary printed by `housemaster status`."""
+def render_status(
+    db_path: str,
+    counts: dict[str, int],
+    run: object | None,
+    searches: Sequence[Any] = (),
+) -> str:
+    """Summary printed by `housemaster status`.
+
+    Doubles as the listing for `rm`, which takes the ids shown here.
+    """
     lines = [
         "",
         f"database   {db_path}",
@@ -147,6 +156,17 @@ def render_status(db_path: str, counts: dict[str, int], run: object | None) -> s
         f"enriched   {counts['enriched']} with detail pages",
         f"outlines   {counts['boundaries']} buurt boundaries",
     ]
+    if searches:
+        lines.append("")
+        lines.append("searches")
+        for row in searches:
+            label = f"  {row['label']}" if row["label"] else ""
+            lines.append(f"  [{row['search_id']}]{label}")
+            lines.append(f"      {row['url']}")
+    else:
+        lines.append("")
+        lines.append("searches   none -- add one with `housemaster add <url>`")
+
     if run is None:
         lines.append("last run   never -- run `housemaster fetch` to populate the cache")
     else:

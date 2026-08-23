@@ -549,3 +549,52 @@ def test_the_scale_uses_quantiles_not_an_even_split(conn: sqlite3.Connection) ->
     # the edges the way an even split over 3500..9000 would.
     counts = [sum(sum(p >= e for e in edges) == k for p in prices) for k in range(5)]
     assert counts == [2, 2, 2, 2, 2]
+
+
+# --- tracked searches ------------------------------------------------------
+
+URL_A = "https://www.funda.nl/zoeken/koop?selected_area=den-haag"
+URL_B = "https://www.funda.nl/zoeken/koop?selected_area=delft"
+
+
+def test_adding_a_search_returns_a_new_id(conn: sqlite3.Connection) -> None:
+    search_id, was_new = db.add_search(conn, URL_A, "Den Haag")
+    assert was_new
+    assert search_id > 0
+    assert [r["url"] for r in db.list_searches(conn)] == [URL_A]
+
+
+def test_adding_the_same_url_twice_is_a_no_op(conn: sqlite3.Connection) -> None:
+    # Re-adding should report the existing id, not raise and not duplicate.
+    first, was_new_1 = db.add_search(conn, URL_A)
+    second, was_new_2 = db.add_search(conn, URL_A, "a label")
+    assert (was_new_1, was_new_2) == (True, False)
+    assert first == second
+    assert len(db.list_searches(conn)) == 1
+
+
+def test_searches_keep_insertion_order(conn: sqlite3.Connection) -> None:
+    db.add_search(conn, URL_A)
+    db.add_search(conn, URL_B)
+    assert [r["url"] for r in db.list_searches(conn)] == [URL_A, URL_B]
+
+
+def test_removing_a_search_returns_its_url(conn: sqlite3.Connection) -> None:
+    search_id, _ = db.add_search(conn, URL_A)
+    assert db.remove_search(conn, search_id) == URL_A
+    assert db.list_searches(conn) == []
+
+
+def test_removing_an_unknown_search_returns_none(conn: sqlite3.Connection) -> None:
+    assert db.remove_search(conn, 999) is None
+
+
+def test_removing_a_search_keeps_its_houses(conn: sqlite3.Connection) -> None:
+    # Deleting listings here would destroy price history for a house that may
+    # still be perfectly live -- delisting is the reconciliation's job.
+    search_id, _ = db.add_search(conn, URL_A)
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1))
+    db.remove_search(conn, search_id)
+    assert db.get_listing(conn, 1) is not None
+    assert db.get_listing(conn, 1)["delisted_at"] is None

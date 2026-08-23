@@ -113,6 +113,8 @@ class FetchReport:
     """Counts for one `fetch` run. Mutable: the pipeline accumulates into it."""
 
     search_url: str
+    started_at: str = ""
+    """One timestamp for the whole run, so its rows sort together."""
     pages_read: int = 0
     seen: int = 0
     new_listings: int = 0

@@ -8,7 +8,7 @@ dedupe, change tracking, resumability, and the delisting guards.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -42,9 +42,31 @@ class FakeFunda:
         self.detail_error: Exception | None = None
         self.boundary_calls: list[str] = []
         self.unresolvable: set[str] = set()
+        self.url_calls: list[str] = []
+        self.by_url: dict[str, Callable[[int], SearchPage]] = {}
 
-    def search(self, _url: str, page: int = 1) -> SearchPage:
+    def serve(self, url: str, ids: list[int]) -> None:
+        """Make `url` a one-page search returning exactly `ids`."""
+
+        def page_of(page: int) -> SearchPage:
+            listings = [
+                make_listing(
+                    listing_id=i,
+                    price=self.prices.get(i, 300_000),
+                    status=self.statuses.get(i, "none"),
+                    url=f"https://www.funda.nl/detail/koop/x/{i}/",
+                )
+                for i in (ids if page == 1 else [])
+            ]
+            return SearchPage(page=page, total_results=len(ids), listings=listings)
+
+        self.by_url[url] = page_of
+
+    def search(self, url: str, page: int = 1) -> SearchPage:
         self.page_calls.append(page)
+        self.url_calls.append(url)
+        if url in self.by_url:
+            return self.by_url[url](page)
         if page == self.block_on_page:
             raise BlockedError("no __NUXT_DATA__ -- likely the Akamai interstitial")
         listings = [
@@ -99,7 +121,8 @@ def funda(monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
 
 def run(conn: sqlite3.Connection, **kwargs: object) -> object:
     kwargs.setdefault("with_boundaries", False)
-    options = pipeline.FetchOptions(search_url="https://example.test/zoeken", **kwargs)
+    kwargs.setdefault("search_urls", ("https://example.test/zoeken",))
+    options = pipeline.FetchOptions(**kwargs)
     return pipeline.run_fetch(conn, options)
 
 
@@ -292,7 +315,7 @@ def test_progress_messages_are_emitted_not_printed(
     messages: list[str] = []
     pipeline.run_fetch(
         conn,
-        pipeline.FetchOptions(search_url="https://example.test/z"),
+        pipeline.FetchOptions(search_urls=("https://example.test/z",)),
         progress=messages.append,
     )
     assert any("page 1/" in m for m in messages)
@@ -345,3 +368,98 @@ def test_a_block_during_the_outline_pass_stops_without_losing_the_run(
     # The sweep already committed; only the outline pass is abandoned.
     assert report.error is not None
     assert db.counts(conn)["total"] == 4
+
+
+# --- several tracked searches ----------------------------------------------
+
+URL_A = "https://example.test/a"
+URL_B = "https://example.test/b"
+
+
+def test_every_tracked_search_is_walked(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [3, 4])
+    report = run(conn, search_urls=(URL_A, URL_B))
+    assert funda.url_calls == [URL_A, URL_B]
+    assert db.counts(conn)["total"] == 4
+    # pages_read describes the run, not one search.
+    assert report.pages_read == 2
+
+
+def test_a_house_in_two_searches_is_stored_once(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [2, 3])
+    run(conn, search_urls=(URL_A, URL_B))
+    assert db.counts(conn)["total"] == 3
+    assert db.get_listing(conn, 2) is not None
+
+
+def test_one_search_does_not_delist_anothers_houses(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    """The whole reason reconciliation takes the union.
+
+    Reconciling per search would have B's sweep decide A's houses are gone --
+    twice over, and they would delist while still being perfectly present.
+    """
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [3, 4])
+    for _ in range(3):
+        report = run(conn, search_urls=(URL_A, URL_B))
+        assert report.delisted == 0
+    for listing_id in (1, 2, 3, 4):
+        assert db.get_listing(conn, listing_id)["delisted_at"] is None
+
+
+def test_a_house_leaving_every_search_still_delists(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [2, 3])
+    run(conn, search_urls=(URL_A, URL_B))
+
+    # House 1 drops out of the only search that had it.
+    funda.serve(URL_A, [2])
+    run(conn, search_urls=(URL_A, URL_B))
+    assert db.get_listing(conn, 1)["delisted_at"] is None  # one strike
+    run(conn, search_urls=(URL_A, URL_B))
+    assert db.get_listing(conn, 1)["delisted_at"] is not None
+
+
+def test_a_house_kept_by_the_other_search_never_delists(
+    conn: sqlite3.Connection, funda: FakeFunda
+) -> None:
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [2, 3])
+    run(conn, search_urls=(URL_A, URL_B))
+
+    funda.serve(URL_A, [1])  # house 2 leaves A but stays in B
+    for _ in range(3):
+        run(conn, search_urls=(URL_A, URL_B))
+    assert db.get_listing(conn, 2)["delisted_at"] is None
+
+
+def test_a_block_on_the_second_search_delists_nothing(
+    conn: sqlite3.Connection, funda: FakeFunda, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A partial walk of the union is not evidence of absence for anyone.
+    funda.serve(URL_A, [1, 2])
+    funda.serve(URL_B, [3, 4])
+    run(conn, search_urls=(URL_A, URL_B))
+
+    def blocked(url: str, page: int = 1) -> SearchPage:
+        if url == URL_B:
+            raise BlockedError("no __NUXT_DATA__ -- likely the Akamai interstitial")
+        return funda.by_url[url](page)
+
+    monkeypatch.setattr(pipeline, "fetch_search_page", blocked)
+    report = run(conn, search_urls=(URL_A, URL_B))
+    assert report.error is not None
+    assert report.complete is False
+    assert report.delisted == 0
+    for listing_id in (3, 4):
+        assert db.get_listing(conn, listing_id)["delisted_at"] is None

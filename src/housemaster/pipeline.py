@@ -39,7 +39,7 @@ DEFAULT_PACE = 0.4
 class FetchOptions:
     """Bundled so `run_fetch` stays under a sane argument count."""
 
-    search_url: str = DEFAULT_SEARCH_URL
+    search_urls: tuple[str, ...] = (DEFAULT_SEARCH_URL,)
     max_pages: int | None = None
     max_details: int | None = None
     with_detail: bool = True
@@ -57,27 +57,37 @@ def run_fetch(
     *,
     progress: Progress = _noop,
 ) -> FetchReport:
-    """Scrape the search into the cache. Returns counts; never raises FundaError."""
+    """Scrape every tracked search into the cache. Never raises FundaError."""
     options = options or FetchOptions()
     now = db.utcnow()  # one timestamp per run, so a run's rows sort together
-    report = FetchReport(search_url=options.search_url)
-    run_id = db.start_run(conn, options.search_url, now)
+    label = " | ".join(options.search_urls)
+    report = FetchReport(search_url=label, started_at=now)
+    run_id = db.start_run(conn, label, now)
 
+    # THE union, not one set per search. A house is present if *any* tracked
+    # search still returns it, so reconciling per search would have each sweep
+    # delist every other search's houses.
+    seen: set[int] = set()
+    report.complete = True
     try:
-        seen = _sweep(conn, options, report, now, progress)
+        for index, url in enumerate(options.search_urls, start=1):
+            if len(options.search_urls) > 1:
+                progress(f"search {index}/{len(options.search_urls)}: {url}")
+            seen |= _sweep(conn, url, options, report, progress)
     except BlockedError as exc:
         report.error = str(exc)
+        report.complete = False
         progress(f"blocked after {report.pages_read} pages -- stopping")
         db.finish_run(conn, run_id, report)
         return report
 
-    # Only a complete sweep is evidence of absence. After a partial one, every
-    # unread page's listings would look missing.
+    # Only a complete walk of *every* search is evidence of absence. After a
+    # partial one, every unread page's listings would look missing.
     if report.complete and options.max_pages is None:
         with conn:
             report.delisted = db.reconcile_presence(conn, seen, now=now)
         if report.delisted:
-            progress(f"{report.delisted} listings no longer appear in this search")
+            progress(f"{report.delisted} listings no longer appear in any search")
     elif not report.complete:
         progress("partial sweep -- skipping presence check")
 
@@ -92,21 +102,25 @@ def run_fetch(
 
 def _sweep(
     conn: sqlite3.Connection,
+    search_url: str,
     options: FetchOptions,
     report: FetchReport,
-    now: str,
     progress: Progress,
 ) -> set[int]:
-    """Walk the search pages, refreshing price and status. One commit per page."""
+    """Walk one search's pages, refreshing price and status. One commit per page.
+
+    `report.pages_read` and the change counters accumulate across searches --
+    they describe the run, not this search.
+    """
     seen: set[int] = set()
     page = 1
     while True:
-        result = fetch_search_page(options.search_url, page)  # no transaction held here
+        result = fetch_search_page(search_url, page)  # no transaction held here
         with conn:
             for listing in result.listings:
                 if listing.listing_id is None:
                     continue
-                outcome = db.upsert_listing(conn, listing, now=now)
+                outcome = db.upsert_listing(conn, listing, now=report.started_at)
                 seen.add(listing.listing_id)
                 report.seen += 1
                 if outcome == "new":
@@ -116,7 +130,7 @@ def _sweep(
                 elif outcome == "status":
                     report.status_changes += 1
 
-        report.pages_read = page
+        report.pages_read += 1
         last_page = result.total_pages
         if options.max_pages is not None:
             last_page = min(last_page, options.max_pages)
@@ -126,7 +140,10 @@ def _sweep(
         )
 
         if page >= last_page:
-            report.complete = options.max_pages is None or last_page == result.total_pages
+            # One capped search makes the whole run partial: `complete` gates
+            # delisting, and it must never be true while pages went unread.
+            if options.max_pages is not None and last_page != result.total_pages:
+                report.complete = False
             return seen
         page += 1
         time.sleep(options.pace)
