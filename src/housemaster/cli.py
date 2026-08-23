@@ -277,8 +277,7 @@ def run_fetch(args: argparse.Namespace) -> int:
     with _fetch_lock(path) as acquired:
         if not acquired:
             print(
-                "Another fetch is already running (scheduled, perhaps). "
-                "Nothing to do.",
+                "Another fetch is already running (scheduled, perhaps). Nothing to do.",
                 file=sys.stderr,
             )
             return EXIT_ERROR

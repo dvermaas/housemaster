@@ -3,6 +3,8 @@ name = "housemaster"
 version = "0.1.0"
 description = "Automated house-listing overviews from funda.nl"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "curl-cffi>=0.16.1",

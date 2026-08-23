@@ -30,8 +30,10 @@ from housemaster.models import (
 BASE_URL = "https://www.funda.nl"
 DEFAULT_SEARCH_URL = (
     "https://www.funda.nl/zoeken/koop"
-    "?selected_area=den-haag&price=250000-350000&floor_area=60-"
+    "?selected_area=den-haag,rijswijk-zh,voorburg&floor_area=50-"
 )
+"""Only a default for the ad-hoc `search` probe. `fetch` walks the tracked
+set instead, so this is a starting point rather than the project's scope."""
 # Re-exported so callers keep importing them from here.
 IMPERSONATE = net.IMPERSONATE
 DEFAULT_TIMEOUT = net.DEFAULT_TIMEOUT

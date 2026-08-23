@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Iterator
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from flask.testing import FlaskClient
@@ -660,3 +661,31 @@ def test_the_restore_script_knows_which_side_it_is_on(client: FlaskClient) -> No
 def test_a_house_page_carries_no_restore_script(client: FlaskClient) -> None:
     # It has no filter context, and redirecting away from a house would be rude.
     assert "housemaster-filters-v1" not in body(client.get("/house/1"))
+
+
+# --- favicon ---------------------------------------------------------------
+
+
+def test_the_favicon_is_well_formed_xml() -> None:
+    """An invalid SVG favicon fails silently as a broken image.
+
+    The first version shipped a double hyphen inside an XML comment, which is
+    illegal and which nothing warns about until you look at a tab.
+    """
+    icon = Path(__file__).resolve().parents[1] / "src/housemaster/web/static/favicon.svg"
+    # S314 is about untrusted input; this file is in the repository.
+    ElementTree.parse(icon)  # noqa: S314 - raises ParseError if malformed
+    assert "--" not in icon.read_text(encoding="utf-8").split("<style>")[0].replace(
+        "<!--", ""
+    ).replace("-->", "")
+
+
+def test_every_page_links_the_favicon(client: FlaskClient) -> None:
+    for path in ("/", "/?view=map", "/house/1"):
+        assert "favicon.svg" in body(client.get(path)), path
+
+
+def test_the_favicon_is_served(client: FlaskClient) -> None:
+    response = client.get("/static/favicon.svg")
+    assert response.status_code == 200
+    assert b"<svg" in response.data
