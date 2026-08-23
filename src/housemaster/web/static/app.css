@@ -130,6 +130,12 @@
 
 * { box-sizing: border-box; }
 
+/* The UA rule for [hidden] is `display: none`, which any author `display:`
+   loses to -- so `hidden` on a flex element does nothing at all. Everything
+   that toggles here (the sort control, the ramp legend, the hover readout)
+   uses the attribute, so it has to actually win. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--paper);
@@ -737,6 +743,36 @@ input:focus, select:focus { border-color: var(--blueprint); outline: none; }
     var(--choro-4) 60% 80%, var(--choro-5) 80% 100%
   );
 }
+
+/* Says so when the map is not showing everything the filters matched. */
+.mapnote {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 3;
+  max-width: 320px;
+  padding: 6px 9px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--blueprint);
+}
+.mapnote b { color: var(--ink); }
+.mapnote code { font-size: 10px; color: var(--ink); }
+
+/* MapLibre's zoom control also lives top-right; keep clear of it. */
+@media (min-width: 720px) {
+  .mapnote { right: 56px; }
+}
+
+.maptoggle[disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.maptoggle[disabled]:hover { color: var(--ink-soft); border-color: var(--rule); }
 
 /* Hover readout, top-left: a dimension callout, not a tooltip -- it stays in
    one place so the eye does not have to chase it around the map. */

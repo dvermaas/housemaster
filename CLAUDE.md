@@ -153,6 +153,7 @@ Swaps the card grid for a MapLibre map of the same filtered set; the rail is sha
 Three things that will break if disturbed:
 
 - **The map instance is created once.** `#map` carries `hx-preserve` so a filter change only calls `source.setData(newUrl)` — rebuilding it on every swap would throw away the viewport the user panned to. Switching to the grid *does* remove the node (hx-preserve needs it in both old and new markup), so `sync()` calls `dropIfDetached()` to tear down the dead instance and free its WebGL context before making a new one.
+- **The rail is rendered once, on a full page load.** Only `#results` is swapped, so anything in the rail that depends on the current view goes stale after a view switch. `reset_url` is rendered server-side (correct on load and without JS) *and* corrected by `nav.js` on `htmx:afterSwap` — otherwise "Clear all filters" on the map drops you back to the grid. Clearing filters keeps the view: it is a property of the page, not of the filter set.
 - **`<input type="hidden" name="view">` lives inside `#results`, not the rail.** The filter form serialises its whole subtree and `#results` is reserialised on every swap; move it to the rail and it goes stale, and filtering on the map drops you back to the grid.
 - **Bounds come from `db.map_bounds`, not from the GeoJSON.** Fitting the view by downloading the feature collection a second time both wasted a request and raced the source load.
 
@@ -168,6 +169,18 @@ A toggleable choropleth of the 105 Den Haag neighbourhoods, shaded by funda's ow
 - **Quantile bins, not a linear ramp** (`db.neighbourhood_price_scale`). Den Haag's buurt prices are strongly right-skewed — 3 533 to 7 641 with the mass under 5 500 — so even spacing put 69 of 102 buurten in the bottom two colours and drew as one flat wash. Equal-count edges put ~20 in each. The JS uses a `step` expression over those edges; the legend bar uses hard stops for the same reason.
 - **The fill's alpha differs per theme** (`--choro-fill`: 0.45 light, 0.32 dark). A translucent fill composites toward the basemap, so a bright wash over a dark basemap hides far more than a dark wash over a pale one. The ramp itself spans a wide lightness range because alpha compresses the visible spread to less than half of it.
 - **Outlines are added *before* the house layers** so markers always sit on top, and the toggle lives **outside** `#map`, so htmx replaces the button on every swap — `map.js` rebinds it in `sync()` and restores state from `localStorage`, exactly like the theme.
+- The toggle is **disabled server-side when no outlines are cached** (`fetch` collects them in its last pass, so a fresh cache has none for a while). `sync()` honours `disabled` over the stored preference, or a remembered "on" would turn on an empty layer.
+
+### What the map admits it is not showing
+
+Two ways the map legitimately draws less than the filter count, both surfaced in `.mapnote` rather than left silent:
+
+- **Coordinates arrive only with the detail page.** Mid-enrichment the map can plot a fraction of its houses; `db.count_map_points` vs `db.count_listings` is the comparison.
+- `MAX_MAP_POINTS` caps the payload, so a pathological filter cannot ship an unbounded one.
+
+**`sort` is stripped from the map's GeoJSON URL** alongside `page` and `view`. A map has no reading order, and leaving it in changed the URL on every sort change, which made MapLibre refetch and redraw the whole source for nothing — during an active fetch that read as houses randomly appearing and vanishing. The sort control itself is `hidden` in map view for the same reason; the choice still round-trips in the URL so the grid keeps it.
+
+**`[hidden] { display: none !important; }` is load-bearing.** The UA rule for `[hidden]` is a plain `display: none`, which any author `display: flex` beats — so `hidden` on the sort control and the ramp legend did nothing while `element.hidden` still reported `true`. Every toggle in the map chrome relies on the attribute; a test pins the rule.
 
 The outline pass (`pipeline._outline`) is backlog-driven like every other queue: it drains to nothing after one run and costs zero requests thereafter, because boundaries do not move.
 

@@ -812,6 +812,23 @@ def query_map_points(
     ).fetchall()
 
 
+def count_map_points(conn: sqlite3.Connection, filters: Filters) -> int:
+    """How many of the filtered houses the map can actually plot.
+
+    Coordinates only arrive with the detail page, so during a first fetch this
+    trails `count_listings` badly. The UI says so rather than quietly drawing a
+    subset -- a map that silently omits four fifths of the results is worse than
+    one that admits it.
+    """
+    where, params = _where(filters)
+    clause = f"{where} AND lat IS NOT NULL" if where else " WHERE lat IS NOT NULL"
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM listings{clause}",  # noqa: S608
+        params,
+    ).fetchone()
+    return int(row[0])
+
+
 def map_bounds(conn: sqlite3.Connection, filters: Filters) -> tuple[float, ...] | None:
     """Bounding box of the filtered set, as (min_lng, min_lat, max_lng, max_lat).
 

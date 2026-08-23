@@ -98,10 +98,14 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
     # The map reads its own data from this URL rather than from the swapped
     # markup, so the map instance survives a filter change with its viewport
     # intact instead of being torn down and rebuilt.
+    #
+    # `sort` is stripped along with `page` and `view`: a map has no order, and
+    # leaving it in changed the URL on every sort change, which made MapLibre
+    # refetch and redraw the whole source for no reason at all.
     geojson_args = {
         k: v
         for k, v in request.args.to_dict(flat=False).items()
-        if k not in {"page", "view"}
+        if k not in {"page", "view", "sort"}
     }
 
     return {
@@ -114,6 +118,12 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
         # this URL is constant and the map never has to reload it.
         "shapes_url": url_for("browse.neighbourhoods_geojson"),
         "hood_scale": db.neighbourhood_price_scale(conn) if view == "map" else None,
+        # Clears every filter but keeps the view: "clear all filters" should
+        # not also mean "and put me back on the grid". Omitted for the default
+        # so the clean case stays a bare `/`.
+        "reset_url": url_for(
+            "browse.index", **({"view": view} if view != "grid" else {})
+        ),
         "other_view": "grid" if view == "map" else "map",
         "view_url": url_for(
             "browse.index",
@@ -123,6 +133,11 @@ def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
             ),
         ),
         "total": total,
+        # Only computed for the map: the grid does not care, and it is a second
+        # COUNT over the same predicate.
+        "mapped": db.count_map_points(conn, filters) if view == "map" else None,
+        "map_limit": db.MAX_MAP_POINTS,
+        "has_boundaries": db.counts(conn)["boundaries"] if view == "map" else 0,
         "page": page,
         "has_more": page * PER_PAGE < total,
         "next_page": page + 1,

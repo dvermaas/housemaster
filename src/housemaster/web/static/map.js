@@ -392,7 +392,10 @@
     if (!container) return;
 
     dropIfDetached();
-    hoodsOn = hoodsWanted();
+    // A remembered "on" must not survive into a cache with no outlines yet:
+    // the button is disabled server-side, so honour that over localStorage.
+    const toggle = document.getElementById("hood-toggle");
+    hoodsOn = hoodsWanted() && !(toggle && toggle.disabled);
     const cfg = readConfig(results);
     if (!map) {
       init(container, cfg);

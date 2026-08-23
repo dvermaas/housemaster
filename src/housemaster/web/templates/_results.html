@@ -19,7 +19,10 @@
       {% if view == 'map' %}▤ Grid{% else %}◈ Map{% endif %}
     </a>
 
-    <label class="sort">
+    {# Hidden on the map: a map has no reading order, so a sort control there
+       does nothing and invites you to think it did. The choice still round-trips
+       in the URL, so switching back to the grid keeps it. #}
+    <label class="sort" {% if view == 'map' %}hidden{% endif %}>
       <span>Sort</span>
       <select name="sort" aria-label="Sort order">
         <option value="newest" {% if filters.sort == 'newest' %}selected{% endif %}>Newest on funda</option>

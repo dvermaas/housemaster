@@ -14,11 +14,35 @@
 
   <div class="mapreadout" id="hood-readout" hidden aria-live="polite"></div>
 
+  {#
+    A map that quietly omits results is worse than one that admits it. Two ways
+    that happens: coordinates arrive only with the detail page, so a cache
+    mid-enrichment can plot a fraction of its houses; and MAX_MAP_POINTS caps
+    the payload so a pathological filter cannot ship an unbounded one.
+  #}
+  {% if mapped is not none and mapped < total %}
+    <div class="mapnote">
+      {% if mapped >= map_limit %}
+        showing the first <b class="fig">{{ map_limit }}</b> of
+        <b class="fig">{{ total }}</b> — narrow the filters to see the rest
+      {% else %}
+        <b class="fig">{{ mapped }}</b> of <b class="fig">{{ total }}</b> houses
+        have coordinates yet — the rest arrive as <code>fetch</code> enriches them
+      {% endif %}
+    </div>
+  {% endif %}
+
   <div class="maptools">
     {# A real button, not a checkbox: it changes what the map draws, not what
        the filter form submits. Keeping it out of the form is deliberate --
        #results is reserialised on every swap and this is not a filter. #}
-    <button type="button" class="maptoggle" id="hood-toggle" aria-pressed="false">
+    {# Disabled until the outlines exist. `fetch` collects them in its last
+       pass, so a freshly reset cache has none for a while, and a toggle that
+       silently does nothing is worse than one that says why. #}
+    <button type="button" class="maptoggle" id="hood-toggle" aria-pressed="false"
+            {% if not has_boundaries %}disabled
+              title="No buurt outlines cached yet -- `housemaster fetch` collects them last"
+            {% endif %}>
       <span class="maptoggle-swatch" aria-hidden="true"></span>
       <span>Buurten</span>
     </button>

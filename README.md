@@ -333,6 +333,10 @@ The two webfonts stay vendored in `web/static/fonts/`. SRI does not cover
 and glyph data is not executable anyway. Our own CSS and JS are served locally
 for the same reason there is no build step: they are the app.
 
+**Clear all filters** keeps you where you are — clearing filters on the map
+leaves you on the map, since the view is a property of the page rather than of
+the filter set.
+
 The filter rail GETs back to `/`, which returns the results fragment when htmx
 asks for it and the full page otherwise. That keeps the pushed URL shareable —
 reloading or bookmarking a filtered view renders properly instead of showing a

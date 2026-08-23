@@ -437,3 +437,107 @@ def test_the_ramp_legend_reads_from_the_same_range(client: FlaskClient) -> None:
 
 def test_the_grid_view_does_not_ship_the_overlay(client: FlaskClient) -> None:
     assert 'id="hood-toggle"' not in body(client.get("/"))
+
+
+# --- what the map admits it is not showing ---------------------------------
+
+
+def test_the_map_geojson_url_ignores_sort(client: FlaskClient) -> None:
+    """A map has no reading order.
+
+    Leaving `sort` in the URL changed it on every sort change, so MapLibre
+    refetched and redrew the whole source for nothing -- which during an active
+    fetch looked like houses randomly appearing and vanishing.
+    """
+    page = body(client.get("/?view=map&sort=price_desc"))
+    start = page.index("data-geojson=")
+    url = page[start : page.index('"', start + 14) + 1]
+    assert "sort" not in url
+
+
+def test_the_sort_control_is_hidden_on_the_map(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    label = page[page.index('class="sort"') : page.index('class="sort"') + 60]
+    assert "hidden" in label
+    # ...but still present in the grid.
+    grid = body(client.get("/"))
+    label = grid[grid.index('class="sort"') : grid.index('class="sort"') + 60]
+    assert "hidden" not in label
+
+
+def test_the_map_says_when_houses_lack_coordinates(client: FlaskClient) -> None:
+    # Only house 1 has a detail page in the fixture, so 1 of 3 is mappable.
+    page = body(client.get("/?view=map"))
+    assert "mapnote" in page
+    assert "have coordinates yet" in page
+
+
+def test_no_note_when_the_map_shows_everything(client: FlaskClient) -> None:
+    # Narrow to the one house that does have coordinates.
+    page = body(client.get("/?view=map&q=Aaastraat"))
+    assert "mapnote" not in page
+
+
+def test_the_buurt_toggle_is_disabled_without_outlines(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(cache)
+    with conn:
+        conn.execute("DELETE FROM boundaries")
+    conn.close()
+    app = create_app(cache)
+    app.config["TESTING"] = True
+    with app.test_client() as bare:
+        page = bare.get("/?view=map").get_data(as_text=True)
+    toggle = page[page.index('id="hood-toggle"') : page.index('id="hood-toggle"') + 260]
+    assert "disabled" in toggle
+
+
+def test_the_buurt_toggle_is_enabled_once_outlines_exist(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map"))
+    toggle = page[page.index('id="hood-toggle"') : page.index('id="hood-toggle"') + 260]
+    assert "disabled" not in toggle
+
+
+def test_the_hidden_attribute_actually_hides() -> None:
+    """Load-bearing and invisible, so pinned here.
+
+    The UA rule for `[hidden]` is `display: none`, which any author `display:`
+    beats. Every toggle in the map chrome uses the attribute, so without this
+    override the sort control and the ramp legend stayed on screen while
+    reporting `hidden === true`.
+    """
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "src/housemaster/web/static/app.css"
+    ).read_text(encoding="utf-8")
+    assert "[hidden] { display: none !important; }" in css
+
+
+# --- clearing filters ------------------------------------------------------
+
+
+def test_clearing_filters_keeps_you_on_the_map(client: FlaskClient) -> None:
+    page = body(client.get("/?view=map&price_min=300000"))
+    start = page.index('class="reset"')
+    link = page[start : page.index("</a>", start)]
+    assert "view=map" in link
+    # ...and it really does drop the filters.
+    assert "price_min" not in link
+
+
+def test_clearing_filters_on_the_grid_is_a_bare_path(client: FlaskClient) -> None:
+    page = body(client.get("/?price_min=300000"))
+    start = page.index('class="reset"')
+    link = page[start : page.index("</a>", start)]
+    assert 'href="/"' in link
+
+
+def test_the_rail_reset_is_corrected_after_a_view_swap(client: FlaskClient) -> None:
+    """The rail is not re-rendered by an htmx swap, so nav.js fixes it.
+
+    Server-side rendering covers the full page load and the no-JS path; this
+    pins the fact that something has to handle the swapped case too.
+    """
+    page = body(client.get("/"))
+    assert "nav.js" in page
