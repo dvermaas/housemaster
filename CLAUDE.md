@@ -176,3 +176,10 @@ alone. Fonts stay vendored (SRI does not cover `@font-face`).
   handles it, and any new entry point needs the same.
 - A funda page yields 15 fully-detailed listings. Pace them
   (`pipeline.DEFAULT_PACE`).
+
+## Git
+
+- Commit as the identity in the previous commits, exactly as it appears there
+  (`git log -3 --format='%an <%ae>'`). Never invent or change it.
+- Keep commit messages concise. No Claude Code link, no `Co-Authored-By: Claude`
+  line, no other trailers.
