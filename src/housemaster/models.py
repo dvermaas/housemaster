@@ -29,6 +29,7 @@ class Listing:
     construction_type: str
     status: str
     published: str
+    """UTC ISO-8601 to the second. Rows stored before 2026-09-19 hold a bare date."""
     agent: str
     url: str
     offering_type: str = "buy"

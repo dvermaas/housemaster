@@ -11,6 +11,7 @@ from housemaster.render import (
     euro,
     format_listing,
     format_summary,
+    local_published,
     render_csv,
     render_json,
     render_page_text,
@@ -27,12 +28,31 @@ def test_euro_uses_dutch_thousands_separators(amount: int | None, expected: str)
     assert euro(amount) == expected
 
 
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("2026-09-04T06:30:00+00:00", "2026-09-04 08:30"),  # CEST, +02:00
+        ("2026-01-15T07:00:03+00:00", "2026-01-15 08:00"),  # CET, +01:00
+        ("2026-09-03T22:30:00+00:00", "2026-09-04 00:30"),  # crosses local midnight
+        ("2026-09-04", "2026-09-04"),  # pre-migration row: no invented 00:00
+        ("", ""),
+    ],
+)
+def test_local_published_shows_dutch_local_time(stored: str, expected: str) -> None:
+    assert local_published(stored) == expected
+
+
+def test_local_published_can_drop_the_time() -> None:
+    assert local_published("2026-09-03T22:30:00+00:00", with_time=False) == "2026-09-04"
+
+
 def test_format_listing_includes_the_key_facts() -> None:
     text = format_listing(make_listing(), position=1)
     assert "[  1] Teststraat 1, 1000AA Den Haag" in text
     assert "€ 300.000 kosten_koper" in text
     assert "€ 4.000/m²" in text
     assert "75 m² | 3 rooms (2 bed) | energy C" in text
+    assert "listed 2026-08-21 12:23" in text
 
 
 def test_format_listing_aligns_continuation_lines_under_the_index() -> None:

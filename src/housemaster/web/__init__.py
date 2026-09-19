@@ -16,7 +16,7 @@ from pathlib import Path
 from flask import Flask, current_app, g
 
 from housemaster import db, photos
-from housemaster.render import euro
+from housemaster.render import euro, local_published
 from housemaster.web import filters, views
 
 
@@ -46,6 +46,7 @@ def create_app(db_path: Path) -> Flask:
     app.jinja_env.filters["energy_class"] = filters.energy_class
     app.jinja_env.filters["compact"] = filters.compact
     app.jinja_env.filters["since"] = filters.since
+    app.jinja_env.filters["published"] = local_published
     app.jinja_env.filters["per_m2"] = filters.per_m2
     app.jinja_env.globals["photo_url"] = photos.photo_url
 

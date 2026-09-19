@@ -14,6 +14,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 from housemaster import net
@@ -85,6 +86,26 @@ def search_url(base: str, page: int = 1) -> str:
         return base
     separator = "&" if "?" in base else "?"
     return f"{base}{separator}search_result={page}"
+
+
+def _published(raw: Any) -> str:
+    """funda's publish time as UTC ISO-8601, to the second.
+
+    funda sends `2026-09-19T08:00:03.2687499+02:00`, and agents' feeds stamp
+    many listings on the hour, so the clock time carries real information. It
+    is stored in UTC like every other timestamp here, so text order is
+    chronological across the DST change. A value that will not parse falls back
+    to its bare date rather than being lost.
+    """
+    if not raw:
+        return ""
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw[:10]
+    if moment.tzinfo is None:
+        return raw[:10]
+    return moment.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _first(value: Any) -> Any:
@@ -159,7 +180,7 @@ def to_listing(raw: dict[str, Any]) -> Listing:
         object_type=raw.get("object_type") or "",
         construction_type=raw.get("construction_type") or "",
         status=raw.get("status") or "",
-        published=(raw.get("publish_date") or "")[:10],
+        published=_published(raw.get("publish_date")),
         agent=(agents[0].get("name", "").strip() if agents else ""),
         url=f"{BASE_URL}{relative_url}" if relative_url else "",
         offering_type=offering,

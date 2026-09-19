@@ -21,7 +21,7 @@ def make_listing(**overrides: object) -> Listing:
         "object_type": "apartment",
         "construction_type": "resale",
         "status": "none",
-        "published": "2026-08-21",
+        "published": "2026-08-21T10:23:46+00:00",
         "agent": "Test Makelaars",
         "url": "https://www.funda.nl/detail/koop/den-haag/x/1/",
         "photo_ids": tuple(f"tiara-media/x/{i}" for i in range(10)),

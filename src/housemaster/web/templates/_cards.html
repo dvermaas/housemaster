@@ -63,7 +63,7 @@
 
       <div class="foot">
         <span class="agent">{{ house.agent }}</span>
-        <span class="listed">{{ house.published }}</span>
+        <span class="listed">{{ house.published | published(with_time=false) }}</span>
       </div>
     </div>
   </article>

@@ -131,7 +131,7 @@
         <h3>Listing</h3>
         <dl>
           <dt>Agent</dt><dd>{{ listing.agent }}</dd>
-          <dt>Published</dt><dd>{{ listing.published }}</dd>
+          <dt>Published</dt><dd>{{ listing.published | published }}</dd>
           <dt>First seen</dt><dd>{{ listing.first_seen_at | since }}</dd>
           <dt>On funda</dt>
           <dd><a href="{{ listing.url }}" target="_blank" rel="noopener"

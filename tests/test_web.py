@@ -35,6 +35,7 @@ def cache(tmp_path: Path) -> Path:
                 listing_id=1, address="Aaastraat 1", price=260_000, living_area=60,
                 energy_label="E", neighbourhood="Spoorwijk", rooms=3, bedrooms=2,
                 photo_ids=("tiara/a", "tiara/b"),
+                published="2026-09-04T06:30:00+00:00",
             ),
             now="2026-01-01T00:00:00+00:00",
         )  # fmt: skip
@@ -357,6 +358,16 @@ def test_a_house_page_shows_its_detail_fields(client: FlaskClient) -> None:
     assert "Bouwjaar" in page
     assert "1931-1944" in page
     assert "Spoorwijk" in page
+
+
+def test_a_house_page_shows_the_publish_time_in_local_time(client: FlaskClient) -> None:
+    # Stored as 06:30 UTC; Amsterdam is +02:00 in September.
+    assert "<dd>2026-09-04 08:30</dd>" in body(client.get("/house/1"))
+
+
+def test_a_card_shows_only_the_publish_date(client: FlaskClient) -> None:
+    page = body(client.get("/"))
+    assert '<span class="listed">2026-09-04</span>' in page
 
 
 def test_a_house_page_shows_neighbourhood_context(client: FlaskClient) -> None:

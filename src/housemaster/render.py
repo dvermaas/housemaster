@@ -10,7 +10,9 @@ import csv
 import io
 import json
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from housemaster.models import FetchReport, Listing, SearchPage
 
@@ -20,6 +22,25 @@ RULE_WIDTH = 100
 def euro(amount: int | None) -> str:
     """Dutch-style thousands separator, e.g. `EUR 289.500`."""
     return f"€ {amount:,}".replace(",", ".") if amount else "n/a"
+
+
+LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
+
+
+def local_published(published: str, *, with_time: bool = True) -> str:
+    """`2026-09-04 08:30` in Dutch local time, from the stored UTC timestamp.
+
+    Rows stored before the clock time was kept hold a bare date; those come
+    back as that date rather than a made-up `00:00`.
+    """
+    try:
+        moment = datetime.fromisoformat(published)
+    except ValueError:
+        return published
+    if moment.tzinfo is None:
+        return published[:10]
+    local = moment.astimezone(LOCAL_TZ)
+    return local.strftime("%Y-%m-%d %H:%M" if with_time else "%Y-%m-%d")
 
 
 def format_listing(listing: Listing, position: int | None = None) -> str:
@@ -35,7 +56,7 @@ def format_listing(listing: Listing, position: int | None = None) -> str:
             f"  ({euro(listing.price_per_m2)}/m²)",
             f"{indent}{listing.living_area} m² | {listing.rooms} rooms "
             f"({listing.bedrooms} bed) | energy {listing.energy_label}",
-            f"{indent}agent: {listing.agent} | listed {listing.published} | "
+            f"{indent}agent: {listing.agent} | listed {local_published(listing.published)} | "
             f"{listing.photo_count} photos",
             f"{indent}{listing.url}",
         ]

@@ -130,7 +130,7 @@ def test_to_listing_maps_every_field(raw_listing: dict[str, Any]) -> None:
         object_type="apartment",
         construction_type="resale",
         status="none",
-        published="2026-08-21",
+        published="2026-08-21T10:23:46+00:00",
         agent="Elzenaar NVM Makelaars & Hypotheken",
         url=(
             "https://www.funda.nl/detail/koop/den-haag"
@@ -166,8 +166,36 @@ def test_listing_without_an_agent(raw_listing: dict[str, Any]) -> None:
     assert to_listing(raw_listing).agent == ""
 
 
-def test_publish_timestamp_is_truncated_to_a_date(raw_listing: dict[str, Any]) -> None:
-    assert to_listing(raw_listing).published == "2026-08-21"
+def test_publish_time_is_kept_to_the_second_in_utc(raw_listing: dict[str, Any]) -> None:
+    # 12:23:46 in Amsterdam (CEST, +02:00) is 10:23:46 UTC. The clock time is the
+    # point: agents' feeds stamp many listings on the hour.
+    assert to_listing(raw_listing).published == "2026-08-21T10:23:46+00:00"
+
+
+def test_publish_time_normalises_across_the_dst_offset(
+    raw_listing: dict[str, Any],
+) -> None:
+    # Winter is +01:00, so the same wall-clock time is a different UTC instant.
+    # UTC is what keeps text order chronological across the change.
+    raw_listing["publish_date"] = "2026-01-15T08:00:03.2687499+01:00"
+    assert to_listing(raw_listing).published == "2026-01-15T07:00:03+00:00"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        ("2026-08-21", "2026-08-21"),  # a bare date has no offset: kept as is
+        ("2026-08-21T12:23:46", "2026-08-21"),  # naive: no instant to convert
+        ("not a date", "not a date"),
+    ],
+)
+def test_publish_time_falls_back_to_the_date(
+    raw_listing: dict[str, Any], raw: str | None, expected: str
+) -> None:
+    raw_listing["publish_date"] = raw
+    assert to_listing(raw_listing).published == expected
 
 
 def test_house_number_may_carry_a_suffix(raw_listing: dict[str, Any]) -> None:
