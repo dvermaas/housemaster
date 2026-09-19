@@ -199,10 +199,22 @@ def _local_insights(state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _listing_store(data: dict[str, Any]) -> dict[str, Any]:
+    """Find the listing block, whose key funda suffixes with the tinyId.
+
+    It was `cachedListingData_nl`, then became `cachedListingData_nl_80955639`
+    around 2026-09-09. Matching the prefix accepts both.
+    """
+    for key, value in data.items():
+        if key.startswith("cachedListingData_nl") and isinstance(value, dict):
+            return value
+    raise KeyError("cachedListingData_nl")
+
+
 def to_detail(state: Any) -> Detail:
     """Read the listing store out of a decoded detail-page state tree."""
     try:
-        listing = state["data"]["cachedListingData_nl"]
+        listing = _listing_store(state["data"])
     except (KeyError, TypeError) as exc:
         raise PayloadError(f"unexpected detail state shape: {exc}") from exc
 

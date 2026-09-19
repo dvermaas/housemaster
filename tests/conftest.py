@@ -69,11 +69,12 @@ def search_state(raw_listing: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture
 def detail_state() -> dict[str, Any]:
-    """A decoded detail page. The localInsights key embeds city/neighbourhood,
-    which is why the extractor has to search for it by prefix."""
+    """A decoded detail page. The listing key embeds the tinyId and the
+    localInsights key embeds city/neighbourhood, which is why the extractor
+    has to search for both by prefix."""
     return {
         "data": {
-            "cachedListingData_nl": {
+            "cachedListingData_nl_80955639": {
                 "globalId": 8116828,
                 "description": {"title": "Omschrijving", "content": "Spoorwijk. Keurig."},
                 "coordinates": {"lat": 52.050217, "lng": 4.3105555},

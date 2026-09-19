@@ -222,8 +222,16 @@ def test_to_detail_flattens_kenmerken_groups(detail_state: dict[str, Any]) -> No
     ]
 
 
+def test_to_detail_finds_the_listing_by_prefix(detail_state: dict[str, Any]) -> None:
+    # funda suffixed the key with the tinyId on 2026-09-09; before that it was
+    # the bare `cachedListingData_nl`. Both must keep working.
+    data = detail_state["data"]
+    bare = {"data": {"cachedListingData_nl": data.pop("cachedListingData_nl_80955639")}}
+    assert to_detail(bare).listing_id == 8116828
+
+
 def test_to_detail_tolerates_a_listing_with_no_insights_block() -> None:
-    detail = to_detail({"data": {"cachedListingData_nl": {"globalId": 1}}})
+    detail = to_detail({"data": {"cachedListingData_nl_1": {"globalId": 1}}})
     assert detail.neighbourhood_price_m2 is None
     assert detail.features == ()
     assert detail.description == ""
