@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { Brand } from "@/components/app-shell"
 import { FilterRail } from "@/components/filter-rail"
 import { HouseGrid } from "@/components/house-grid"
 import { ResultsBar } from "@/components/results-bar"
@@ -22,6 +23,16 @@ import { useBrowse } from "@/lib/use-browse"
 const loadMap = () => import("@/components/map-view")
 const MapView = React.lazy(loadMap)
 
+const RAIL_KEY = "housemaster-rail"
+
+function railStored() {
+  try {
+    return localStorage.getItem(RAIL_KEY) !== "0"
+  } catch {
+    return true
+  }
+}
+
 export function BrowsePage() {
   const browse = useBrowse()
   const { index, sorted, search, view, update } = browse
@@ -42,19 +53,50 @@ export function BrowsePage() {
     idle(() => void loadMap())
   }, [])
 
+  // The desktop filter rail. Below `lg` it is a sheet and this does nothing.
+  const [railOpen, setRailOpen] = React.useState(railStored)
+  const toggleRail = React.useCallback(() => {
+    setRailOpen((open) => {
+      try {
+        localStorage.setItem(RAIL_KEY, open ? "0" : "1")
+      } catch {
+        /* private mode: the toggle still works for this visit */
+      }
+      return !open
+    })
+  }, [])
+
   const searchInput = React.useRef<HTMLInputElement>(null)
   useHotkeys({
     m: () => update({ view: view === "map" ? undefined : "map" }),
-    "/": () => searchInput.current?.focus(),
+    "[": toggleRail,
+    "/": () => {
+      if (!railOpen && window.matchMedia("(min-width: 64rem)").matches)
+        setRailOpen(true)
+      // After the rail has rendered, or there is nothing to focus yet.
+      requestAnimationFrame(() => searchInput.current?.focus())
+    },
   })
 
   return (
     <div className="flex flex-1">
-      <aside className="sticky top-12 hidden h-below-header w-72 shrink-0 overflow-y-auto border-r lg:block">
-        <FilterRail browse={browse} searchRef={searchInput} />
-      </aside>
+      {railOpen && (
+        <aside className="sticky top-0 hidden h-svh w-72 shrink-0 flex-col border-r lg:flex">
+          {/* h-12, like the results bar, so their bottom borders line up. */}
+          <div className="flex h-12 shrink-0 items-center border-b px-4">
+            <Brand />
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <FilterRail browse={browse} searchRef={searchInput} />
+          </div>
+        </aside>
+      )}
       <main className="flex min-w-0 flex-1 flex-col">
-        <ResultsBar browse={browse} />
+        <ResultsBar
+          browse={browse}
+          railOpen={railOpen}
+          onToggleRail={toggleRail}
+        />
         {index.isPending ? (
           <GridSkeleton />
         ) : index.isError ? (

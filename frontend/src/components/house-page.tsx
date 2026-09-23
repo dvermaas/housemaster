@@ -6,20 +6,17 @@ import {
   ChevronUpIcon,
   ExternalLinkIcon,
   ImagesIcon,
+  MapIcon,
   MapPinIcon,
 } from "lucide-react"
 import * as React from "react"
 
+import { CommandMenuButton } from "@/components/app-shell"
 import { Lightbox } from "@/components/lightbox"
 import { NotFoundPage } from "@/components/not-found"
+import { ThemeMenu } from "@/components/theme-menu"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
 import { EnergyLabel } from "@/components/ui/energy-label"
 import { Kbd } from "@/components/ui/kbd"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -51,8 +48,12 @@ import {
 } from "@/lib/format"
 import { useHotkeys } from "@/lib/hotkeys"
 import { lastSearch, neighbours } from "@/lib/session"
+import { cn } from "@/lib/utils"
 
 const GALLERY_PREVIEW = 5
+
+// MapLibre is most of the bundle; the map view's chunk already holds it.
+const HouseMap = React.lazy(() => import("@/components/house-map"))
 
 /** The index row for this house, from whichever side's index is in memory.
  *  It holds everything the header shows, so the page paints at once and only
@@ -140,49 +141,53 @@ export function HousePage() {
           <ArrowLeftIcon data-icon="inline-start" />
           All houses
         </Button>
-        {around && (
-          <div className="ml-auto flex items-center gap-1">
-            <span className="mr-1 font-mono text-xs text-muted-foreground">
-              {around.position} / {around.total}
-            </span>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    aria-label="Previous house"
-                    disabled={around.previous === undefined}
-                    onClick={() => go(around.previous)}
-                  />
-                }
-              >
-                <ChevronUpIcon />
-              </TooltipTrigger>
-              <TooltipContent>
-                Previous <Kbd>K</Kbd>
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    aria-label="Next house"
-                    disabled={around.next === undefined}
-                    onClick={() => go(around.next)}
-                  />
-                }
-              >
-                <ChevronDownIcon />
-              </TooltipTrigger>
-              <TooltipContent>
-                Next <Kbd>J</Kbd>
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        )}
+        <div className="ml-auto flex items-center gap-1.5">
+          {around && (
+            <div className="flex items-center gap-1">
+              <span className="mr-1 font-mono text-xs text-muted-foreground">
+                {around.position} / {around.total}
+              </span>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label="Previous house"
+                      disabled={around.previous === undefined}
+                      onClick={() => go(around.previous)}
+                    />
+                  }
+                >
+                  <ChevronUpIcon />
+                </TooltipTrigger>
+                <TooltipContent>
+                  Previous <Kbd>K</Kbd>
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label="Next house"
+                      disabled={around.next === undefined}
+                      onClick={() => go(around.next)}
+                    />
+                  }
+                >
+                  <ChevronDownIcon />
+                </TooltipTrigger>
+                <TooltipContent>
+                  Next <Kbd>J</Kbd>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+          <CommandMenuButton />
+          <ThemeMenu />
+        </div>
       </nav>
 
       <header className="flex flex-col gap-3">
@@ -327,6 +332,76 @@ function Gallery({
   )
 }
 
+type Fact = { label: string; value: React.ReactNode }
+
+/** Rows funda sends that read as broken on their own. */
+function tidy(
+  group: string,
+  rows: { label: string; value: string }[],
+  energyLabel: string | null
+): Fact[] {
+  const out: Fact[] = []
+  for (const { label, value } of rows) {
+    // The value is the text of funda's help link; the label is a picture.
+    if (label === "Energielabel" && value.startsWith("Wat betekent")) {
+      if (energyLabel)
+        out.push({ label, value: <EnergyLabel label={energyLabel} /> })
+      continue
+    }
+    if (!value) {
+      // A parcel number has no value, and is the whole point of its group.
+      if (group === "Kadastrale gegevens") out.push({ label, value: null })
+      // Anything else is a heading whose rows the parser does not keep yet.
+      continue
+    }
+    out.push({ label, value })
+  }
+  return out
+}
+
+/** An eyebrow heading over a ruled section, as the old kenmerken were. */
+function Section({
+  title,
+  className,
+  children,
+}: {
+  title: string
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className={cn("flex flex-col gap-4", className)}>
+      <h2 className="border-b pb-2 font-mono text-xs font-medium tracking-widest text-muted-foreground uppercase">
+        {title}
+      </h2>
+      {children}
+    </section>
+  )
+}
+
+/** Label left, value right. A row without a value spans the line. */
+function Facts({ rows }: { rows: Fact[] }) {
+  return (
+    <dl className="flex flex-col text-sm">
+      {rows.map(({ label, value }) =>
+        value === null ? (
+          <dd key={label} className="py-1">
+            {label}
+          </dd>
+        ) : (
+          <div
+            key={label}
+            className="flex items-baseline justify-between gap-6 py-1"
+          >
+            <dt className="shrink-0 text-muted-foreground">{label}</dt>
+            <dd className="text-right font-medium">{value}</dd>
+          </div>
+        )
+      )}
+    </dl>
+  )
+}
+
 function Details({
   detail,
   offering,
@@ -344,232 +419,293 @@ function Details({
       out.set(f.group, rows)
     }
     return [...out]
-  }, [features])
+      .map(([group, rows]) => ({
+        group,
+        rows: tidy(group, rows, listing.energy_label),
+      }))
+      .filter(({ rows }) => rows.length > 0)
+  }, [features, listing.energy_label])
 
-  return (
-    <div className="grid gap-6 lg:grid-cols-3">
-      <div className="flex flex-col gap-6 lg:col-span-2">
-        {listing.description && <Description text={listing.description} />}
+  const hood: Fact[] = []
+  if (listing.neighbourhood_price_m2) {
+    hood.push(
+      {
+        label: "Average asking price",
+        value: (
+          <span className="font-mono">
+            {euro(listing.neighbourhood_price_m2)}/m²
+          </span>
+        ),
+      },
+      {
+        label: "This house",
+        value: (
+          <span className="font-mono">
+            {euro(listing.price_per_m2)}
+            {perM2(offering)}
+          </span>
+        ),
+      }
+    )
+  }
+  if (listing.neighbourhood_inhabitants) {
+    hood.push({
+      label: "Inhabitants",
+      value: (
+        <span className="font-mono">
+          {compact(listing.neighbourhood_inhabitants)}
+        </span>
+      ),
+    })
+  }
 
-        {groups.length > 0 && (
-          <section className="flex flex-col gap-3">
-            <h2 className="font-heading text-lg font-semibold">Kenmerken</h2>
-            <div className="grid gap-4 sm:grid-cols-2">
-              {groups.map(([group, rows]) => (
-                <Card key={group} size="sm">
-                  <CardHeader>
-                    <CardTitle>{group}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
-                      {rows.map((row) => (
-                        <React.Fragment key={`${row.label}-${row.value}`}>
-                          <dt className="text-muted-foreground">{row.label}</dt>
-                          <dd>{row.value}</dd>
-                        </React.Fragment>
-                      ))}
-                    </dl>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </section>
-        )}
+  const map =
+    listing.lat !== null && listing.lng !== null ? (
+      <div className="flex flex-col gap-2">
+        <React.Suspense fallback={<Skeleton className="aspect-4/3 w-full" />}>
+          <HouseMap lat={listing.lat} lng={listing.lng} />
+        </React.Suspense>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            render={
+              <Link
+                to="/"
+                search={{
+                  view: "map",
+                  offering: offering === "rent" ? "rent" : undefined,
+                }}
+              />
+            }
+          >
+            <MapIcon data-icon="inline-start" />
+            Big map
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            render={
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${listing.lat},${listing.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Open in Google Maps"
+              />
+            }
+          >
+            <MapPinIcon data-icon="inline-start" />
+            Google Maps
+          </Button>
+        </div>
       </div>
+    ) : null
 
-      <aside className="flex flex-col gap-4">
-        {history.length > 1 && <PriceHistory history={history} />}
+  // Two rows on a wide screen: the description beside the map, then the
+  // kenmerken beside the rest -- so "Kenmerken" and "Buurt" start level.
+  return (
+    <div className="grid gap-10 lg:grid-cols-3">
+      {listing.description && (
+        <Description
+          // Per house, so j/k to the next one starts collapsed and remeasures.
+          key={listing.listing_id}
+          text={listing.description}
+          fill={map !== null}
+        />
+      )}
+      {listing.description && map}
 
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>Buurt</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
-              {listing.neighbourhood_price_m2 ? (
-                <>
-                  <dt className="text-muted-foreground">
-                    Average asking price
-                  </dt>
-                  <dd className="font-mono">
-                    {euro(listing.neighbourhood_price_m2)}/m²
-                  </dd>
-                  <dt className="text-muted-foreground">This house</dt>
-                  <dd className="font-mono">
-                    {euro(listing.price_per_m2)}
-                    {perM2(offering)}
-                  </dd>
-                </>
-              ) : null}
-              {listing.neighbourhood_inhabitants ? (
-                <>
-                  <dt className="text-muted-foreground">Inhabitants</dt>
-                  <dd className="font-mono">
-                    {compact(listing.neighbourhood_inhabitants)}
-                  </dd>
-                </>
-              ) : null}
-            </dl>
+      {groups.length > 0 && (
+        <Section title="Kenmerken" className="lg:col-span-2">
+          {/* Columns, not a grid: groups run from one row to ten, and a grid
+              pads every short one out to its row's tallest. */}
+          <div className="columns-1 gap-10 sm:columns-2">
+            {groups.map(({ group, rows }) => (
+              <div key={group} className="mb-6 break-inside-avoid">
+                <h3 className="mb-1 text-sm font-semibold">{group}</h3>
+                <Facts rows={rows} />
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Sticky, so the numbers stay beside you down the kenmerken instead
+          of leaving a column of white. */}
+      <aside className="flex flex-col gap-8 lg:sticky lg:top-4 lg:col-start-3 lg:self-start">
+        {!listing.description && map}
+
+        {hood.length > 0 && (
+          <Section title="Buurt">
+            <Facts rows={hood} />
             {offering === "rent" && listing.neighbourhood_price_m2 ? (
-              <p className="mt-2 text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Funda publishes the buurt average as a purchase price, so it is
                 not a rent benchmark.
               </p>
             ) : null}
-          </CardContent>
-        </Card>
+          </Section>
+        )}
 
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>Listing</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-col gap-3">
-              <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
-                <dt className="text-muted-foreground">Agent</dt>
-                <dd>{listing.agent}</dd>
-                <dt className="text-muted-foreground">Published</dt>
-                <dd className="font-mono">
-                  {publishedLabel(listing.published)}
-                </dd>
-                <dt className="text-muted-foreground">First seen</dt>
-                <dd>{since(isoToEpoch(listing.first_seen_at))}</dd>
-              </dl>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={
-                    <a
-                      href={listing.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label="Open on funda"
-                    />
-                  }
-                >
-                  <ExternalLinkIcon data-icon="inline-start" />
-                  Open on funda
-                </Button>
-                {listing.lat !== null && listing.lng !== null && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    render={
-                      <a
-                        href={`https://www.google.com/maps/search/?api=1&query=${listing.lat},${listing.lng}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label="Open in Google Maps"
-                      />
-                    }
-                  >
-                    <MapPinIcon data-icon="inline-start" />
-                    Google Maps
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  render={
-                    <Link
-                      to="/"
-                      search={{
-                        view: "map",
-                        offering: offering === "rent" ? "rent" : undefined,
-                      }}
-                    />
-                  }
-                >
-                  Show on map
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        {history.length > 1 && <PriceHistory history={history} />}
+
+        <Section title="Listing">
+          <Facts
+            rows={[
+              { label: "Agent", value: listing.agent },
+              {
+                label: "Published",
+                value: (
+                  <span className="font-mono">
+                    {publishedLabel(listing.published)}
+                  </span>
+                ),
+              },
+              {
+                label: "First seen",
+                value: since(isoToEpoch(listing.first_seen_at)),
+              },
+            ]}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            render={
+              <a
+                href={listing.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Open on funda"
+              />
+            }
+          >
+            <ExternalLinkIcon data-icon="inline-start" />
+            Open on funda
+          </Button>
+        </Section>
       </aside>
     </div>
   )
 }
 
 /** Descriptions run to several screens. The first few lines say most of it. */
-function Description({ text }: { text: string }) {
+const COLLAPSED_LINES = 8
+
+/** `fill`: on a wide screen, take exactly the height of the map beside it --
+ *  as many whole lines as fit -- so the row below starts level on both sides.
+ *  The section contributes no height of its own (`h-0 min-h-full`); the map
+ *  sets the row, and the text is measured into it. */
+function Description({ text, fill }: { text: string; fill: boolean }) {
   const [open, setOpen] = React.useState(false)
-  const long = text.length > 700
+  const box = React.useRef<HTMLDivElement>(null)
+  const body = React.useRef<HTMLParagraphElement>(null)
+  const [fit, setFit] = React.useState({
+    lines: COLLAPSED_LINES,
+    overflows: text.length > 700,
+  })
+
+  React.useEffect(() => {
+    const boxNode = box.current
+    const bodyNode = body.current
+    if (open || !boxNode || !bodyNode) return undefined
+    const wide = window.matchMedia("(min-width: 64rem)")
+    const measure = () => {
+      const line = Number.parseFloat(getComputedStyle(bodyNode).lineHeight)
+      const lines =
+        fill && wide.matches && line > 0
+          ? Math.max(3, Math.floor(boxNode.clientHeight / line))
+          : COLLAPSED_LINES
+      // scrollHeight is the whole text's height, whatever the clamp.
+      const overflows = bodyNode.scrollHeight > lines * line + 1
+      setFit((prev) =>
+        prev.lines === lines && prev.overflows === overflows
+          ? prev
+          : { lines, overflows }
+      )
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(boxNode)
+    wide.addEventListener("change", measure)
+    return () => {
+      observer.disconnect()
+      wide.removeEventListener("change", measure)
+    }
+  }, [open, fill])
+
+  const filling = fill && !open
   return (
-    <section className="flex flex-col gap-3">
-      <h2 className="font-heading text-lg font-semibold">Omschrijving</h2>
-      <Collapsible open={open || !long} onOpenChange={setOpen}>
-        <div
-          className={
-            open || !long
-              ? "text-sm leading-relaxed whitespace-pre-line"
-              : "line-clamp-8 text-sm leading-relaxed whitespace-pre-line"
-          }
+    <Section
+      title="Omschrijving"
+      className={cn("lg:col-span-2", filling && "lg:h-0 lg:min-h-full")}
+    >
+      <div ref={box} className={cn(filling && "lg:min-h-0 lg:flex-1")}>
+        <p
+          ref={body}
+          className={cn(
+            "text-sm leading-relaxed whitespace-pre-line",
+            !open && "line-clamp-(--lines)"
+          )}
+          style={{ "--lines": fit.lines } as React.CSSProperties}
         >
           {text}
-        </div>
-        <CollapsibleContent />
-        {long && (
-          <CollapsibleTrigger
-            render={
-              <Button variant="link" size="sm" className="mt-1 -ml-2.5" />
-            }
-          >
-            {open ? "Show less" : "Read the whole description"}
-          </CollapsibleTrigger>
-        )}
-      </Collapsible>
-    </section>
+        </p>
+      </div>
+      {(open || fit.overflows) && (
+        <Button
+          variant="link"
+          size="sm"
+          className="-mt-2 -ml-2.5 self-start"
+          onClick={() => setOpen(!open)}
+        >
+          {open ? "Show less" : "Read the whole description"}
+        </Button>
+      )}
+    </Section>
   )
 }
 
 function PriceHistory({ history }: { history: HouseDetail["history"] }) {
   return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>Price history</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableBody>
-            {history.map((row, i) => {
-              const previous = i > 0 ? history[i - 1].price : null
-              const delta = previous && row.price ? row.price - previous : 0
-              return (
-                <TableRow key={row.id}>
-                  <TableCell>
-                    <span className="font-mono text-xs">
-                      {row.observed_at.slice(0, 10)}
+    <Section title="Price history">
+      <Table>
+        <TableBody>
+          {history.map((row, i) => {
+            const previous = i > 0 ? history[i - 1].price : null
+            const delta = previous && row.price ? row.price - previous : 0
+            return (
+              <TableRow key={row.id}>
+                <TableCell>
+                  <span className="font-mono text-xs">
+                    {row.observed_at.slice(0, 10)}
+                  </span>
+                </TableCell>
+                <TableCell>
+                  <span className="font-mono">{euro(row.price)}</span>
+                </TableCell>
+                <TableCell>
+                  {delta < 0 && (
+                    <span className="font-mono text-xs text-energy-a">
+                      −{euro(-delta)}
                     </span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="font-mono">{euro(row.price)}</span>
-                  </TableCell>
-                  <TableCell>
-                    {delta < 0 && (
-                      <span className="font-mono text-xs text-energy-a">
-                        −{euro(-delta)}
-                      </span>
-                    )}
-                    {delta > 0 && (
-                      <span className="font-mono text-xs text-destructive">
-                        +{euro(delta)}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-muted-foreground">
-                      {statusLabel(row.status)}
+                  )}
+                  {delta > 0 && (
+                    <span className="font-mono text-xs text-destructive">
+                      +{euro(delta)}
                     </span>
-                  </TableCell>
-                </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <span className="text-xs text-muted-foreground">
+                    {statusLabel(row.status)}
+                  </span>
+                </TableCell>
+              </TableRow>
+            )
+          })}
+        </TableBody>
+      </Table>
+    </Section>
   )
 }
 
@@ -582,7 +718,7 @@ function DetailsSkeleton() {
         <Skeleton className="h-4 w-full" />
         <Skeleton className="h-4 w-2/3" />
       </div>
-      <Skeleton className="h-48 w-full" />
+      <Skeleton className="aspect-4/3 w-full" />
     </div>
   )
 }

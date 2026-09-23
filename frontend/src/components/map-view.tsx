@@ -8,17 +8,13 @@
  * created once and kept. Only a theme change rebuilds it (see below), and the
  * camera is carried across that and across trips to the grid.
  */
-import "maplibre-gl/dist/maplibre-gl.css"
-
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
-import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url"
 import {
   Map as MapLibre,
   NavigationControl,
   Popup,
   ScaleControl,
-  setWorkerUrl,
 } from "maplibre-gl"
 import type {
   ExpressionSpecification,
@@ -34,12 +30,8 @@ import { ENERGY_SCALE, EnergyLabel } from "@/components/ui/energy-label"
 import { Toggle } from "@/components/ui/toggle"
 import { type House, photoUrl, type Shapes, shapesQuery } from "@/lib/data"
 import { compact, euro, perM2, plural, statusLabel } from "@/lib/format"
+import { basemap, tokenColour } from "@/lib/maplibre"
 import type { useBrowse } from "@/lib/use-browse"
-
-// MapLibre 6 finds its worker relative to its own module, which a bundler
-// renames. Vite bundles the worker (and the chunk it shares with the main
-// library) as its own file and hands back where it put it.
-setWorkerUrl(workerUrl)
 
 const DEN_HAAG: [number, number] = [4.3007, 52.0705]
 const HOODS_KEY = "housemaster-hoods"
@@ -55,23 +47,6 @@ type Camera = {
 /** Where you left the map, kept for the session: switching to the grid and
  *  back should not throw you out to a fit-all view again. */
 let lastCamera: Camera | null = null
-
-/** A CSS custom property as `rgb()`. Theme tokens are oklch, which MapLibre's
- *  colour parser does not read, so the browser does the conversion: paint one
- *  pixel with it and read the pixel back. */
-function tokenColour(name: string): string {
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim()
-  const canvas = document.createElement("canvas")
-  canvas.width = canvas.height = 1
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })
-  if (!ctx || !value) return "#888888"
-  ctx.fillStyle = value
-  ctx.fillRect(0, 0, 1, 1)
-  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data
-  return `rgb(${r}, ${g}, ${b})`
-}
 
 const tokenNumber = (name: string, fallback: number) =>
   Number(getComputedStyle(document.documentElement).getPropertyValue(name)) ||
@@ -214,7 +189,7 @@ export default function MapView({
     const camera = lastCamera
     const map = new MapLibre({
       container: node,
-      style: `https://tiles.openfreemap.org/styles/${resolvedTheme === "dark" ? "dark" : "positron"}`,
+      style: basemap(resolvedTheme),
       center: camera?.center ?? DEN_HAAG,
       zoom: camera?.zoom ?? 12,
       bearing: camera?.bearing ?? 0,

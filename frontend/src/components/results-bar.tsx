@@ -1,5 +1,13 @@
-import { LayoutGridIcon, MapIcon, SlidersHorizontalIcon } from "lucide-react"
+import { Link } from "@tanstack/react-router"
+import {
+  LayoutGridIcon,
+  MapIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react"
 
+import { CommandMenuButton } from "@/components/app-shell"
 import { FilterRail } from "@/components/filter-rail"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,6 +25,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import { ThemeMenu } from "@/components/theme-menu"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
@@ -32,14 +41,56 @@ import type { useBrowse } from "@/lib/use-browse"
 
 type Browse = ReturnType<typeof useBrowse>
 
-export function ResultsBar({ browse }: { browse: Browse }) {
+export function ResultsBar({
+  browse,
+  railOpen,
+  onToggleRail,
+}: {
+  browse: Browse
+  railOpen: boolean
+  onToggleRail: () => void
+}) {
   const { search, update, offering, view, matched, index } = browse
   const active = FILTER_KEYS.filter(
     (k) => k !== "sort" && search[k] !== undefined
   ).length
 
   return (
-    <div className="sticky top-12 z-30 flex flex-wrap items-center gap-2 border-b bg-background/85 px-4 py-2 backdrop-blur-md">
+    <div className="sticky top-0 z-30 flex min-h-12 flex-wrap items-center gap-2 border-b bg-background/85 px-4 py-1.5 backdrop-blur-md">
+      {/* The rail carries the name; without it, the logo alone stays home. */}
+      <Link
+        to="/"
+        aria-label="Housemaster"
+        className={railOpen ? "lg:hidden" : undefined}
+      >
+        <img src="/favicon.svg" alt="" className="size-5" />
+      </Link>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="relative hidden lg:inline-flex"
+              aria-label={railOpen ? "Hide filters" : "Show filters"}
+              aria-pressed={railOpen}
+              onClick={onToggleRail}
+            />
+          }
+        >
+          {railOpen ? <PanelLeftCloseIcon /> : <PanelLeftOpenIcon />}
+        </TooltipTrigger>
+        <TooltipContent>
+          {railOpen ? "Hide filters" : "Show filters"} <Kbd>[</Kbd>
+        </TooltipContent>
+      </Tooltip>
+      {/* Hidden filters are still filtering: say how many. */}
+      {!railOpen && active > 0 && (
+        <Badge variant="secondary" className="hidden lg:inline-flex">
+          {active} {active === 1 ? "filter" : "filters"}
+        </Badge>
+      )}
+
       {/* The mode switch, not a filter: it changes what `price` means, so
           switching drops the price bounds -- a 0–1 800 rent range means
           nothing for buying. The other filters come along. */}
@@ -144,6 +195,9 @@ export function ResultsBar({ browse }: { browse: Browse }) {
             Switch view <Kbd>M</Kbd>
           </TooltipContent>
         </Tooltip>
+
+        <CommandMenuButton />
+        <ThemeMenu />
       </div>
     </div>
   )

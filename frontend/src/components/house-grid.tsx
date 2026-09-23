@@ -8,14 +8,22 @@ import type { useBrowse } from "@/lib/use-browse"
 const MIN_CARD_WIDTH = 280
 const GAP = 16
 const ROW_ESTIMATE = 360
+/** Divides evenly into 1, 2, 3, 4 and 6 columns, so no batch ends mid-row. */
+const BATCH = 48
+/** Grow once the last rendered row is this close to the end. */
+const GROW_AHEAD = 3
 
-/** Every matching house, virtualised.
+/** How far the last list was scrolled into, so Back from a detail page lands
+ *  on a page tall enough for the router to restore the scroll position. */
+let remembered = { key: "", count: BATCH }
+
+/** The matching houses, virtualised, in batches as you scroll.
  *
- *  All of them, not a page: the index is already in memory, so there is
- *  nothing to load more of. Only the rows near the viewport exist in the DOM,
- *  which keeps a 5 000-house result as cheap to scroll as a 20-house one. It
- *  scrolls the window rather than a box, so the browser's own scroll
- *  restoration and keyboard scrolling keep working. */
+ *  The index is already in memory, so a batch costs nothing to "load"; it
+ *  exists so the page -- and its scrollbar -- is as long as what you have
+ *  looked at, not the whole result. Only the rows near the viewport exist in
+ *  the DOM either way. It scrolls the window rather than a box, so the
+ *  browser's own scroll restoration and keyboard scrolling keep working. */
 export function HouseGrid({
   houses,
   browse,
@@ -43,13 +51,34 @@ export function HouseGrid({
     return () => observer.disconnect()
   }, [])
 
-  const rows = Math.ceil(houses.length / columns)
+  // A new filter set starts from the first batch again.
+  const listKey = JSON.stringify(browse.search)
+  const [batch, setBatch] = React.useState(() => ({
+    key: listKey,
+    count: remembered.key === listKey ? remembered.count : BATCH,
+  }))
+  if (batch.key !== listKey) setBatch({ key: listKey, count: BATCH })
+  const shown = Math.min(batch.count, houses.length)
+
+  React.useEffect(() => {
+    remembered = batch
+  }, [batch])
+
+  const rows = Math.ceil(shown / columns)
   const virtualizer = useWindowVirtualizer({
     count: rows,
     estimateSize: () => ROW_ESTIMATE,
     overscan: 3,
     gap: GAP,
     scrollMargin: offset,
+    // Scrolling, resizing and measuring all land here: the moment the last
+    // rendered row nears the end is the moment to add the next batch.
+    onChange: (instance) => {
+      const last = instance.getVirtualItems().at(-1)?.index ?? 0
+      if (shown < houses.length && last >= rows - GROW_AHEAD)
+        // Idempotent: several calls before the next render add one batch.
+        setBatch((b) => ({ ...b, count: Math.max(b.count, shown + BATCH) }))
+    },
   })
 
   const areaRange = browse.index.data?.facets.areaRange ?? [0, 0]
@@ -80,7 +109,10 @@ export function HouseGrid({
             }
           >
             {houses
-              .slice(row.index * columns, row.index * columns + columns)
+              .slice(
+                row.index * columns,
+                Math.min(shown, row.index * columns + columns)
+              )
               .map((house, i) => (
                 <HouseCard
                   key={house.id}
