@@ -19,5 +19,5 @@ DEFAULT_TIMEOUT = 30
 
 def get_text(url: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     response = requests.get(url, impersonate=IMPERSONATE, timeout=timeout)
-    response.raise_for_status()
+    response.raise_for_status()  # type: ignore[no-untyped-call]  # curl_cffi
     return response.text

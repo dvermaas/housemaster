@@ -13,6 +13,8 @@ uv run housemaster fetch          # walks EVERY tracked search
 uv run housemaster serve
 uv run pytest                     # offline; -m network needs HOUSEMASTER_NETWORK_TESTS=1
 uv run ruff check . && uv run ruff format .
+uv run mypy                       # strict, over src and tests
+uv run python -m housemaster.web.typescript frontend/src/lib/api.gen.ts
 
 cd frontend                       # React SPA; npm, not pnpm
 npm run dev                       # :5173, proxies /api to `serve` on :8765
@@ -38,6 +40,7 @@ schedule <- cli                   pure date arithmetic
 pipeline <- cli                   the ONLY network + database module
 render   <- cli
 web      <- cli                   never fetches; JSON API + the built SPA
+web.api  <- web, web.typescript   the API's response shapes (TypedDicts)
 ```
 
 Keep these apart. `cli.py` prints; library code returns data or calls a
@@ -75,6 +78,12 @@ Search state lives at `state["pinia"]["search"]`; detail state at
   municipalities (`Bomenbuurt` in Den Haag and Rijswijk). A buurt slug only
   resolves under its own city.
 - Migrations: append to `MIGRATIONS`, never edit an existing one.
+- **`web/api.py` is the API contract.** Every JSON response is typed with its
+  `TypedDict`s; `frontend/src/lib/api.gen.ts` is generated from them and never
+  edited by hand (prettier ignores it). `tests/test_api_contract.py` checks real
+  responses against the shapes key for key, `Listing` against the table's
+  columns, and fails when the generated file is stale. Change a response:
+  edit `api.py`, regenerate, and let `tsc` find the readers.
 
 ## funda quirks
 
@@ -127,7 +136,11 @@ style, on Base UI -- not Radix). MapLibre from npm, lazy-loaded. Flask serves
 - **The detail page renders at once from the index row**; photos, kenmerken
   and history stream in. It is prefetched on hover/focus (router
   `defaultPreload: "intent"`), and j/k prefetches the neighbours.
-- The grid is **virtualised against the window**, all results, no paging.
+- The grid is **virtualised against the window** and grows in batches of 48
+  as you near the end (`house-grid.tsx`), so the scrollbar reflects what you
+  have seen, not the whole result. The batch count is module state keyed on
+  the search, so Back from a detail page lands on a page tall enough to
+  restore the scroll position.
   `HouseCard` and the buurt list are memoised; structural sharing keeps
   unchanged search params identity-stable so they skip re-renders. Check a
   change with a filter toggle before and after -- ~80 ms to paint on the Pi.
@@ -166,8 +179,8 @@ The design system:
   codebase uses it as a dash everywhere else, and an invalid favicon fails
   silently. A pytest checks it.
 - Keyboard: ⌘K palette (its own search -- cmdk's filtering is off, it cannot
-  score 5 000 items), `/`, `M`, `J`/`K`, `Esc`, `D`. `useHotkeys` stands aside
-  while typing.
+  score 5 000 items), `/`, `M`, `[` (filter rail), `J`/`K`, `Esc`, `D`.
+  `useHotkeys` stands aside while typing.
 - The shadcn MCP server is configured in `.mcp.json`; use it to add registry
   components (`npx shadcn@latest add <name>` in `frontend/` does the same).
 

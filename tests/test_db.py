@@ -16,7 +16,7 @@ import pytest
 from housemaster import db
 from housemaster.models import Boundary, Detail, Feature, FetchReport
 
-from .test_models import make_listing
+from .test_models import make_listing, stored
 
 
 @pytest.fixture
@@ -119,14 +119,14 @@ def test_a_read_only_connection_cannot_write(
 def test_price_per_m2_is_computed_by_the_database(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, price=289_500, living_area=84))
-    assert db.get_listing(conn, 1)["price_per_m2"] == 3446
+    assert stored(conn, 1)["price_per_m2"] == 3446
 
 
 def test_price_per_m2_is_null_when_area_is_missing(conn: sqlite3.Connection) -> None:
     # The generated column must not blow up on a divide by zero.
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1, living_area=None))
-    assert db.get_listing(conn, 1)["price_per_m2"] is None
+    assert stored(conn, 1)["price_per_m2"] is None
 
 
 # --- upsert and change tracking --------------------------------------------
@@ -164,7 +164,7 @@ def test_a_price_drop_is_recorded(conn: sqlite3.Connection) -> None:
     assert outcome == "price"
     history = db.get_price_history(conn, 1)
     assert [row["price"] for row in history] == [300_000, 289_500]
-    assert db.get_listing(conn, 1)["price"] == 289_500
+    assert stored(conn, 1)["price"] == 289_500
 
 
 def test_a_status_change_is_recorded(conn: sqlite3.Connection) -> None:
@@ -188,7 +188,7 @@ def test_tiny_id_is_taken_from_the_url(conn: sqlite3.Connection) -> None:
     url = "https://www.funda.nl/detail/koop/den-haag/appartement-x/44561281/"
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=8116828, url=url))
-    row = db.get_listing(conn, 8116828)
+    row = stored(conn, 8116828)
     assert row["listing_id"] == 8116828
     assert row["tiny_id"] == "44561281"
 
@@ -232,7 +232,7 @@ def test_save_detail_marks_the_listing_enriched(conn: sqlite3.Connection) -> Non
     with conn:
         db.save_detail(conn, detail_for(1))
     assert db.listings_needing_detail(conn) == []
-    assert db.get_listing(conn, 1)["neighbourhood_price_m2"] == 3929
+    assert stored(conn, 1)["neighbourhood_price_m2"] == 3929
 
 
 def test_saving_detail_twice_does_not_duplicate_features(
@@ -270,7 +270,7 @@ def test_one_absence_is_not_enough_to_delist(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1))
     assert delist(conn, set()) == 0
-    row = db.get_listing(conn, 1)
+    row = stored(conn, 1)
     assert row["delisted_at"] is None
     assert row["missed_runs"] == 1
 
@@ -280,7 +280,7 @@ def test_two_consecutive_absences_delist(conn: sqlite3.Connection) -> None:
         db.upsert_listing(conn, make_listing(listing_id=1))
     delist(conn, set())
     assert delist(conn, set()) == 1
-    assert db.get_listing(conn, 1)["delisted_at"] is not None
+    assert stored(conn, 1)["delisted_at"] is not None
 
 
 def test_reappearing_resets_the_miss_counter(conn: sqlite3.Connection) -> None:
@@ -288,7 +288,7 @@ def test_reappearing_resets_the_miss_counter(conn: sqlite3.Connection) -> None:
         db.upsert_listing(conn, make_listing(listing_id=1))
     delist(conn, set())  # missed once
     delist(conn, {1})  # seen again -> counter clears
-    assert db.get_listing(conn, 1)["missed_runs"] == 0
+    assert stored(conn, 1)["missed_runs"] == 0
     assert delist(conn, set()) == 0  # so one later miss still is not enough
 
 
@@ -298,8 +298,8 @@ def test_a_seen_listing_is_never_delisted(conn: sqlite3.Connection) -> None:
         db.upsert_listing(conn, make_listing(listing_id=2))
     delist(conn, {1, 2})
     delist(conn, {1, 2})
-    assert db.get_listing(conn, 1)["delisted_at"] is None
-    assert db.get_listing(conn, 2)["delisted_at"] is None
+    assert stored(conn, 1)["delisted_at"] is None
+    assert stored(conn, 2)["delisted_at"] is None
 
 
 def test_delisting_never_deletes_data(conn: sqlite3.Connection) -> None:
@@ -307,7 +307,7 @@ def test_delisting_never_deletes_data(conn: sqlite3.Connection) -> None:
         db.upsert_listing(conn, make_listing(listing_id=1))
     delist(conn, set())
     delist(conn, set())
-    assert db.get_listing(conn, 1) is not None
+    assert stored(conn, 1) is not None
     assert db.counts(conn) == {"total": 1, "active": 0, "enriched": 0, "boundaries": 0}
 
 
@@ -319,7 +319,7 @@ def test_a_relisted_house_is_un_delisted(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1))
     delist(conn, {1})
-    assert db.get_listing(conn, 1)["delisted_at"] is None
+    assert stored(conn, 1)["delisted_at"] is None
 
 
 # --- queries ---------------------------------------------------------------
@@ -414,6 +414,7 @@ def test_run_records_are_written(conn: sqlite3.Connection) -> None:
     db.finish_run(conn, run_id, report)
 
     row = db.latest_run(conn)
+    assert row is not None
     assert row["pages_read"] == 3
     assert row["seen"] == 45
     assert row["complete"] == 1
@@ -579,8 +580,8 @@ def test_removing_a_search_keeps_its_houses(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1))
     db.remove_search(conn, search_id)
-    assert db.get_listing(conn, 1) is not None
-    assert db.get_listing(conn, 1)["delisted_at"] is None
+    assert stored(conn, 1) is not None
+    assert stored(conn, 1)["delisted_at"] is None
 
 
 # --- buy vs rent -----------------------------------------------------------
@@ -630,7 +631,7 @@ def test_counts_can_scope_or_span(conn: sqlite3.Connection) -> None:
 def test_price_per_m2_is_computed_for_rentals_too(conn: sqlite3.Connection) -> None:
     # Meaningful in its own right: EUR/m2 per month is a normal rental quote.
     seed_both(conn)
-    assert db.get_listing(conn, 3)["price_per_m2"] == 25  # 1500 / 60
+    assert stored(conn, 3)["price_per_m2"] == 25  # 1500 / 60
 
 
 def test_a_rental_never_delists_a_purchase(conn: sqlite3.Connection) -> None:
@@ -638,13 +639,13 @@ def test_a_rental_never_delists_a_purchase(conn: sqlite3.Connection) -> None:
     seed_both(conn)
     delist(conn, {1, 2, 3, 4})
     for listing_id in (1, 2, 3, 4):
-        assert db.get_listing(conn, listing_id)["delisted_at"] is None
+        assert stored(conn, listing_id)["delisted_at"] is None
 
 
 def test_existing_rows_migrate_to_buy(conn: sqlite3.Connection) -> None:
     with conn:
         db.upsert_listing(conn, make_listing(listing_id=1))
-    assert db.get_listing(conn, 1)["offering_type"] == "buy"
+    assert stored(conn, 1)["offering_type"] == "buy"
 
 
 def test_searches_record_which_side_they_track(conn: sqlite3.Connection) -> None:

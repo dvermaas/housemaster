@@ -17,13 +17,24 @@ import hashlib
 import json
 import mimetypes
 import sqlite3
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from flask import Blueprint, Response, abort, current_app, jsonify, request
 
 from housemaster import db
+from housemaster.web.api import (
+    ErrorPayload,
+    HousePayload,
+    IndexColumn,
+    IndexPayload,
+    Listing,
+    Offering,
+    SearchPayload,
+    ShapesPayload,
+)
 
 bp = Blueprint("browse", __name__)
 
@@ -41,10 +52,10 @@ def _conn() -> sqlite3.Connection:
     return get_conn()
 
 
-def _offering(raw: str) -> str:
+def _offering(raw: str) -> Offering:
     if raw not in db.OFFERING_TYPES:
         abort(404)
-    return raw
+    return cast("Offering", raw)
 
 
 # --- caching ---------------------------------------------------------------
@@ -74,13 +85,13 @@ class _Payload:
 
     __slots__ = ("body", "etag", "gzipped")
 
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Mapping[str, object]) -> None:
         self.body = json.dumps(data, separators=(",", ":")).encode()
         self.gzipped = gzip.compress(self.body, compresslevel=6)
         self.etag = hashlib.sha1(self.body, usedforsecurity=False).hexdigest()[:20]
 
 
-def _cached(key: str, build: Any) -> _Payload:
+def _cached(key: str, build: Callable[[], Mapping[str, object]]) -> _Payload:
     """Build once per data version, per process.
 
     The index is ~1.5 MB of JSON for a few thousand houses and every page load
@@ -101,7 +112,7 @@ def _respond(payload: _Payload) -> Response:
     """Conditional and compressed. A 304 is the common case on a warm client."""
     if payload.etag in request.if_none_match:
         response = Response(status=304)
-    elif "gzip" in request.accept_encodings:
+    elif request.accept_encodings.quality("gzip") > 0:
         response = Response(payload.gzipped, mimetype="application/json")
         response.headers["Content-Encoding"] = "gzip"
     else:
@@ -132,10 +143,11 @@ def _epoch(timestamp: str | None) -> int | None:
     return int(moment.timestamp())
 
 
-def _index(offering: str) -> dict[str, Any]:
+def _index(offering: Offering) -> IndexPayload:
     conn = _conn()
     rows = db.browse_index(conn, offering)
-    columns = list(db.INDEX_COLUMNS)
+    counts = db.counts(conn, offering)
+    columns = cast("list[IndexColumn]", list(db.INDEX_COLUMNS))
     time_columns = {columns.index(c) for c in ("published", "first_seen_at")}
     delisted = columns.index("delisted_at")
 
@@ -148,6 +160,7 @@ def _index(offering: str) -> dict[str, Any]:
         return values
 
     run = db.latest_run(conn)
+    scale = db.neighbourhood_price_scale(conn)
     return {
         "offering": offering,
         # Columnar: names once, then bare arrays. Half the size of an array of
@@ -155,9 +168,14 @@ def _index(offering: str) -> dict[str, Any]:
         "columns": columns,
         "rows": [encode(row) for row in rows],
         "meta": {
-            "counts": db.counts(conn, offering),
+            "counts": {
+                "total": counts["total"],
+                "active": counts["active"],
+                "enriched": counts["enriched"],
+                "boundaries": counts["boundaries"],
+            },
             "last_run": _epoch(run["started_at"]) if run else None,
-            "hood_scale": db.neighbourhood_price_scale(conn),
+            "hood_scale": list(scale) if scale else None,
         },
     }
 
@@ -179,7 +197,8 @@ def search(offering: str) -> Response:
     offering = _offering(offering)
     q = (request.args.get("q") or "").strip()[:MAX_QUERY]
     ids = db.search_ids(_conn(), offering, q) if q else []
-    return jsonify({"q": q, "ids": ids})
+    payload: SearchPayload = {"q": q, "ids": ids}
+    return jsonify(payload)
 
 
 @bp.route("/api/house/<int:listing_id>")
@@ -189,32 +208,32 @@ def house(listing_id: int) -> Response:
     listing = db.get_listing(conn, listing_id)
     if listing is None:
         abort(404)
-    return jsonify(
-        {
-            "listing": {k: listing[k] for k in listing.keys()},  # noqa: SIM118 - Row
-            "features": [
-                {
-                    "group": row["group_title"],
-                    "label": row["label"],
-                    "value": row["value"],
-                }
-                for row in db.get_features(conn, listing_id)
-            ],
-            "photos": [row["image_id"] for row in db.get_photos(conn, listing_id)],
-            "history": [
-                {
-                    "id": row["id"],
-                    "observed_at": row["observed_at"],
-                    "price": row["price"],
-                    "status": row["status"],
-                }
-                for row in db.get_price_history(conn, listing_id)
-            ],
-        }
-    )
+    payload: HousePayload = {
+        # Every column, as stored: the contract test holds `Listing` to it.
+        "listing": cast("Listing", dict(listing)),
+        "features": [
+            {
+                "group": row["group_title"],
+                "label": row["label"],
+                "value": row["value"],
+            }
+            for row in db.get_features(conn, listing_id)
+        ],
+        "photos": [row["image_id"] for row in db.get_photos(conn, listing_id)],
+        "history": [
+            {
+                "id": row["id"],
+                "observed_at": row["observed_at"],
+                "price": row["price"],
+                "status": row["status"],
+            }
+            for row in db.get_price_history(conn, listing_id)
+        ],
+    }
+    return jsonify(payload)
 
 
-def _shapes() -> dict[str, Any]:
+def _shapes() -> ShapesPayload:
     """Buurt outlines, coloured by funda's own price level for that buurt.
 
     Unfiltered on purpose: this is the map's context layer. Outlines that
@@ -248,7 +267,8 @@ def neighbourhoods_geojson() -> Response:
 def api_not_found(_rest: str) -> Response:
     """An unknown API path is a JSON 404, never the app shell -- a client that
     got HTML back from a typo'd endpoint would fail somewhere far less obvious."""
-    response = jsonify({"error": "not found"})
+    payload: ErrorPayload = {"error": "not found"}
+    response = jsonify(payload)
     response.status_code = 404
     return response
 
@@ -273,7 +293,7 @@ def _asset(path: Path) -> tuple[bytes, bytes | None, str]:
 
 def _serve(path: Path, *, immutable: bool) -> Response:
     body, gzipped, mimetype = _asset(path)
-    if gzipped is not None and "gzip" in request.accept_encodings:
+    if gzipped is not None and request.accept_encodings.quality("gzip") > 0:
         response = Response(gzipped, mimetype=mimetype)
         response.headers["Content-Encoding"] = "gzip"
     else:

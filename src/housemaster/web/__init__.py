@@ -27,7 +27,8 @@ def get_conn() -> sqlite3.Connection:
     connections are not shareable across threads."""
     if "conn" not in g:
         g.conn = db.connect(current_app.config["DB_PATH"], read_only=True)
-    return g.conn
+    conn: sqlite3.Connection = g.conn
+    return conn
 
 
 def close_conn(_exception: BaseException | None = None) -> None:

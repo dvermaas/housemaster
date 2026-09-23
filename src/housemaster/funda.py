@@ -99,12 +99,13 @@ def _published(raw: Any) -> str:
     """
     if not raw:
         return ""
+    text = str(raw)
     try:
-        moment = datetime.fromisoformat(raw)
+        moment = datetime.fromisoformat(text)
     except ValueError:
-        return raw[:10]
+        return text[:10]
     if moment.tzinfo is None:
-        return raw[:10]
+        return text[:10]
     return moment.astimezone(UTC).isoformat(timespec="seconds")
 
 
@@ -239,6 +240,9 @@ def to_detail(state: Any) -> Detail:
     except (KeyError, TypeError) as exc:
         raise PayloadError(f"unexpected detail state shape: {exc}") from exc
 
+    listing_id = listing.get("globalId")
+    if not isinstance(listing_id, int):
+        raise PayloadError(f"detail state has no globalId: {listing_id!r}")
     coordinates = listing.get("coordinates") or {}
     insights = _local_insights(state)
 
@@ -255,7 +259,7 @@ def to_detail(state: Any) -> Detail:
     )
 
     return Detail(
-        listing_id=listing.get("globalId"),
+        listing_id=listing_id,
         description=(listing.get("description") or {}).get("content") or "",
         lat=coordinates.get("lat"),
         lng=coordinates.get("lng"),

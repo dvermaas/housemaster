@@ -11,6 +11,7 @@ import gzip
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree
 
 import pytest
@@ -112,7 +113,7 @@ def client(cache: Path, dist: Path) -> Iterator[FlaskClient]:
         yield test_client
 
 
-def index_rows(client: FlaskClient, offering: str = "buy") -> dict[int, dict]:
+def index_rows(client: FlaskClient, offering: str = "buy") -> dict[int, dict[str, Any]]:
     payload = client.get(f"/api/index/{offering}").get_json()
     columns = payload["columns"]
     return {row[0]: dict(zip(columns, row, strict=True)) for row in payload["rows"]}

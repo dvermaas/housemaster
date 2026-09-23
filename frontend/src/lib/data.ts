@@ -10,7 +10,17 @@
  */
 import { get, set } from "idb-keyval"
 
-export const OFFERINGS = ["buy", "rent"] as const
+import type {
+  Counts,
+  HousePayload,
+  IndexColumn,
+  IndexPayload,
+  Offering as WireOffering,
+  SearchPayload,
+  ShapeProperties,
+} from "@/lib/api.gen"
+
+export const OFFERINGS = ["buy", "rent"] as const satisfies WireOffering[]
 export type Offering = (typeof OFFERINGS)[number]
 
 export type House = {
@@ -43,12 +53,7 @@ export type House = {
 }
 
 export type IndexMeta = {
-  counts: {
-    total: number
-    active: number
-    enriched: number
-    boundaries: number
-  }
+  counts: Counts
   lastRun: number | null
   /** Quantile edges for the buurt choropleth: (lo, b1..b4, hi). */
   hoodScale: number[] | null
@@ -69,23 +74,14 @@ export type BrowseIndex = {
   facets: Facets
 }
 
-type Wire = {
-  offering: Offering
-  columns: string[]
-  rows: unknown[][]
-  meta: {
-    counts: IndexMeta["counts"]
-    last_run: number | null
-    hood_scale: number[] | null
-  }
-}
+type Wire = IndexPayload
 
 type Stored = { etag: string; wire: Wire }
 
 const STORE_KEY = (offering: Offering) => `housemaster-index-v1:${offering}`
 
 function decode(wire: Wire): BrowseIndex {
-  const at = (name: string) => {
+  const at = (name: IndexColumn) => {
     const index = wire.columns.indexOf(name)
     if (index < 0) throw new Error(`index is missing column ${name}`)
     return index
@@ -233,48 +229,12 @@ export async function fetchSearch(
     `/api/search/${offering}?q=${encodeURIComponent(q)}`
   )
   if (!response.ok) throw new Error(`search: HTTP ${response.status}`)
-  const body = (await response.json()) as { ids: number[] }
+  const body = (await response.json()) as SearchPayload
   return new Set(body.ids)
 }
 
-export type HouseDetail = {
-  listing: Record<string, unknown> & {
-    listing_id: number
-    address: string
-    postal_code: string
-    city: string
-    neighbourhood: string
-    price: number | null
-    price_condition: string
-    price_per_m2: number | null
-    living_area: number | null
-    rooms: number | null
-    bedrooms: number | null
-    energy_label: string | null
-    status: string
-    url: string
-    description: string | null
-    agent: string
-    published: string
-    first_seen_at: string
-    delisted_at: string | null
-    lat: number | null
-    lng: number | null
-    neighbourhood_price_m2: number | null
-    neighbourhood_inhabitants: number | null
-    offering_type: Offering
-    object_type: string
-    construction_type: string
-  }
-  features: { group: string; label: string; value: string }[]
-  photos: string[]
-  history: {
-    id: number
-    observed_at: string
-    price: number | null
-    status: string
-  }[]
-}
+/** Generated from the server's own definition; see `src/housemaster/web/api.py`. */
+export type HouseDetail = HousePayload
 
 export const houseQuery = (id: number) => ({
   queryKey: ["house", id] as const,
@@ -291,7 +251,7 @@ export class NotFound extends Error {}
 
 export type Shapes = GeoJSON.FeatureCollection<
   GeoJSON.Geometry,
-  { name: string; price_m2: number | null }
+  ShapeProperties
 >
 
 export const shapesQuery = {

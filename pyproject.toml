@@ -46,6 +46,7 @@ artifacts = ["src/housemaster/web/dist/"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=8.3",
     "ruff>=0.14",
 ]
@@ -62,6 +63,14 @@ markers = [
     "network: hits funda.nl for real (deselect with '-m \"not network\"')",
 ]
 xfail_strict = true       # an xfail that passes is a failure worth knowing about
+
+[tool.mypy]
+# `uv run mypy`. Strict from the start: the code was already annotated, and
+# the web API's shapes (`web/api.py`) are only worth having if they are checked.
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+python_version = "3.14"
 
 [tool.ruff]
 line-length = 90

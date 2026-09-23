@@ -31,7 +31,7 @@ _UNWRAP = {"Ref", "Reactive", "ShallowRef", "ShallowReactive", "Shallow"}
 _LITERAL = {"Date", "BigInt", "URL", "Object"}
 
 
-def parse(payload: str | list) -> Any:
+def parse(payload: str | list[Any]) -> Any:
     """Decode a __NUXT_DATA__ payload (JSON text or already-parsed list)."""
     slots = json.loads(payload) if isinstance(payload, str) else payload
 

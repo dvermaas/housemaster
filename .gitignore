@@ -12,6 +12,7 @@ data/
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 
 # MCP browser output (snapshots, screenshots, network dumps)
 .playwright-mcp/

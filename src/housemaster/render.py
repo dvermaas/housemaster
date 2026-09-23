@@ -11,10 +11,13 @@ import io
 import json
 from collections.abc import Iterable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from housemaster.models import FetchReport, Listing, SearchPage
+
+if TYPE_CHECKING:
+    import sqlite3
 
 RULE_WIDTH = 100
 
@@ -163,7 +166,7 @@ def render_fetch_report(report: FetchReport, counts: dict[str, int]) -> str:
 def render_status(
     db_path: str,
     counts: dict[str, int],
-    run: object | None,
+    run: sqlite3.Row | None,
     searches: Sequence[Any] = (),
 ) -> str:
     """Summary printed by `housemaster status`.

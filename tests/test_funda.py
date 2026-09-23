@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from housemaster import funda, net
+from housemaster import funda
 from housemaster.funda import (
     BlockedError,
     PayloadError,
@@ -47,7 +47,7 @@ def captured_get(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["kwargs"] = kwargs
         return FakeResponse(calls.get("body", ""))
 
-    monkeypatch.setattr(net.requests, "get", fake_get)
+    monkeypatch.setattr("housemaster.net.requests.get", fake_get)
     return calls
 
 

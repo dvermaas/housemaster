@@ -10,14 +10,22 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from housemaster import db, pipeline
 from housemaster.funda import BlockedError, PayloadError
-from housemaster.models import PAGE_SIZE, Boundary, Detail, Feature, SearchPage
+from housemaster.models import (
+    PAGE_SIZE,
+    Boundary,
+    Detail,
+    Feature,
+    FetchReport,
+    SearchPage,
+)
 
-from .test_models import make_listing
+from .test_models import make_listing, stored
 
 
 @pytest.fixture
@@ -109,7 +117,7 @@ class FakeFunda:
         monkeypatch.setattr(pipeline, "fetch_search_page", self.search)
         monkeypatch.setattr(pipeline, "fetch_detail", self.detail)
         monkeypatch.setattr(pipeline, "fetch_boundary", self.boundary)
-        monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None)
+        monkeypatch.setattr("housemaster.pipeline.time.sleep", lambda _s: None)
         return self
 
 
@@ -119,7 +127,7 @@ def funda(monkeypatch: pytest.MonkeyPatch) -> FakeFunda:
     return FakeFunda([[1, 2], [3, 4]]).install(monkeypatch)
 
 
-def run(conn: sqlite3.Connection, **kwargs: object) -> object:
+def run(conn: sqlite3.Connection, **kwargs: Any) -> FetchReport:
     kwargs.setdefault("with_boundaries", False)
     kwargs.setdefault("search_urls", ("https://example.test/zoeken",))
     options = pipeline.FetchOptions(**kwargs)
@@ -191,7 +199,7 @@ def test_a_status_change_is_picked_up(conn: sqlite3.Connection, funda: FakeFunda
     funda.statuses[2] = "under_bid"
     report = run(conn)
     assert report.status_changes == 1
-    assert db.get_listing(conn, 2)["status"] == "under_bid"
+    assert stored(conn, 2)["status"] == "under_bid"
 
 
 # --- resumability ----------------------------------------------------------
@@ -263,11 +271,11 @@ def test_a_listing_needs_two_complete_absences_to_delist(
 
     FakeFunda([[1, 2], [3]]).install(monkeypatch)  # 4 vanished
     assert run(conn).delisted == 0  # paging jitter, not evidence
-    assert db.get_listing(conn, 4)["delisted_at"] is None
+    assert stored(conn, 4)["delisted_at"] is None
 
     FakeFunda([[1, 2], [3]]).install(monkeypatch)
     assert run(conn).delisted == 1
-    assert db.get_listing(conn, 4)["delisted_at"] is not None
+    assert stored(conn, 4)["delisted_at"] is not None
 
 
 def test_a_delisted_listing_keeps_all_its_data(
@@ -279,7 +287,7 @@ def test_a_delisted_listing_keeps_all_its_data(
     run(conn)
     run(conn)
 
-    assert db.get_listing(conn, 2) is not None
+    assert stored(conn, 2) is not None
     assert db.get_features(conn, 2)
     assert db.get_price_history(conn, 2)
 
@@ -395,7 +403,7 @@ def test_a_house_in_two_searches_is_stored_once(
     funda.serve(URL_B, [2, 3])
     run(conn, search_urls=(URL_A, URL_B))
     assert db.counts(conn)["total"] == 3
-    assert db.get_listing(conn, 2) is not None
+    assert stored(conn, 2) is not None
 
 
 def test_one_search_does_not_delist_anothers_houses(
@@ -412,7 +420,7 @@ def test_one_search_does_not_delist_anothers_houses(
         report = run(conn, search_urls=(URL_A, URL_B))
         assert report.delisted == 0
     for listing_id in (1, 2, 3, 4):
-        assert db.get_listing(conn, listing_id)["delisted_at"] is None
+        assert stored(conn, listing_id)["delisted_at"] is None
 
 
 def test_a_house_leaving_every_search_still_delists(
@@ -425,9 +433,9 @@ def test_a_house_leaving_every_search_still_delists(
     # House 1 drops out of the only search that had it.
     funda.serve(URL_A, [2])
     run(conn, search_urls=(URL_A, URL_B))
-    assert db.get_listing(conn, 1)["delisted_at"] is None  # one strike
+    assert stored(conn, 1)["delisted_at"] is None  # one strike
     run(conn, search_urls=(URL_A, URL_B))
-    assert db.get_listing(conn, 1)["delisted_at"] is not None
+    assert stored(conn, 1)["delisted_at"] is not None
 
 
 def test_a_house_kept_by_the_other_search_never_delists(
@@ -440,7 +448,7 @@ def test_a_house_kept_by_the_other_search_never_delists(
     funda.serve(URL_A, [1])  # house 2 leaves A but stays in B
     for _ in range(3):
         run(conn, search_urls=(URL_A, URL_B))
-    assert db.get_listing(conn, 2)["delisted_at"] is None
+    assert stored(conn, 2)["delisted_at"] is None
 
 
 def test_a_block_on_the_second_search_delists_nothing(
@@ -462,4 +470,4 @@ def test_a_block_on_the_second_search_delists_nothing(
     assert report.complete is False
     assert report.delisted == 0
     for listing_id in (3, 4):
-        assert db.get_listing(conn, listing_id)["delisted_at"] is None
+        assert stored(conn, listing_id)["delisted_at"] is None

@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
+from housemaster import db
 from housemaster.models import Listing, SearchPage
+
+
+def stored(conn: sqlite3.Connection, listing_id: int) -> sqlite3.Row:
+    """A listing row that the test has just put there."""
+    row = db.get_listing(conn, listing_id)
+    assert row is not None, f"listing {listing_id} is not in the cache"
+    return row
 
 
 def make_listing(**overrides: object) -> Listing:

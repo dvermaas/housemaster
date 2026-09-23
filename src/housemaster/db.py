@@ -343,12 +343,16 @@ def upsert_listing(
     appends nothing, so the history stays a log of changes rather than of runs.
     """
     now = now or utcnow()
+    listing_id = listing.listing_id
+    if listing_id is None:
+        # The pipeline skips these; a caller that did not is a bug, not data.
+        raise ValueError("a listing without a globalId cannot be stored")
     previous = conn.execute(
-        "SELECT price, status FROM listings WHERE listing_id = ?", (listing.listing_id,)
+        "SELECT price, status FROM listings WHERE listing_id = ?", (listing_id,)
     ).fetchone()
 
     values = {
-        "listing_id": listing.listing_id,
+        "listing_id": listing_id,
         "tiny_id": _tiny_id(listing.url),
         "url": listing.url,
         "address": listing.address,
@@ -382,8 +386,8 @@ def upsert_listing(
             f"VALUES (:listing_id, {placeholders}, :now, :now)",
             values,
         )
-        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
-        _replace_photo_ids(conn, listing.listing_id, listing.photo_ids)
+        _record_observation(conn, listing_id, now, listing.price, listing.status)
+        _replace_photo_ids(conn, listing_id, listing.photo_ids)
         return "new"
 
     assignments = ", ".join(f"{name} = :{name}" for name in _LISTING_COLUMNS)
@@ -392,13 +396,13 @@ def upsert_listing(
         "last_seen_at = :now, delisted_at = NULL WHERE listing_id = :listing_id",
         values,
     )
-    _replace_photo_ids(conn, listing.listing_id, listing.photo_ids)
+    _replace_photo_ids(conn, listing_id, listing.photo_ids)
 
     if previous["price"] != listing.price:
-        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
+        _record_observation(conn, listing_id, now, listing.price, listing.status)
         return "price"
     if previous["status"] != listing.status:
-        _record_observation(conn, listing.listing_id, now, listing.price, listing.status)
+        _record_observation(conn, listing_id, now, listing.price, listing.status)
         return "status"
     return "seen"
 
@@ -705,10 +709,11 @@ def neighbourhood_price_scale(
 
 
 def get_listing(conn: sqlite3.Connection, listing_id: int) -> sqlite3.Row | None:
-    return conn.execute(
+    row: sqlite3.Row | None = conn.execute(
         f"SELECT *, {_CARD_EXTRAS} FROM listings WHERE listing_id = ?",  # noqa: S608
         (listing_id,),
     ).fetchone()
+    return row
 
 
 def get_features(conn: sqlite3.Connection, listing_id: int) -> list[sqlite3.Row]:
@@ -732,9 +737,10 @@ def get_price_history(conn: sqlite3.Connection, listing_id: int) -> list[sqlite3
 
 
 def latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    return conn.execute(
+    row: sqlite3.Row | None = conn.execute(
         "SELECT * FROM fetch_runs ORDER BY run_id DESC LIMIT 1"
     ).fetchone()
+    return row
 
 
 def counts(conn: sqlite3.Connection, offering_type: str | None = None) -> dict[str, int]:

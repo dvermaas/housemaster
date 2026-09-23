@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -514,8 +514,9 @@ def run_search(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     _use_utf8_output()
     args = build_parser().parse_args(argv)
+    handler: Callable[[argparse.Namespace], int] = args.handler
     try:
-        return args.handler(args)
+        return handler(args)
     except FundaError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR

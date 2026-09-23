@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import housemaster
 from housemaster import cli, db
 from housemaster.funda import BlockedError
 from housemaster.models import FetchReport, SearchPage
@@ -119,7 +120,7 @@ def test_version_flag_reports_the_package_version(
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["--version"])
     assert excinfo.value.code == 0
-    assert capsys.readouterr().out.strip() == f"housemaster {cli.__version__}"
+    assert capsys.readouterr().out.strip() == f"housemaster {housemaster.__version__}"
 
 
 def test_bad_format_choice_is_rejected() -> None:
