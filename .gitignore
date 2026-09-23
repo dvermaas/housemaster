@@ -25,3 +25,7 @@ data/
 
 # Fetch lock (lives beside the cache)
 *.fetch-lock
+
+# Built by `npm run build` in frontend/
+src/housemaster/web/dist/
+frontend/node_modules/

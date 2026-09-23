@@ -351,88 +351,57 @@ def ids(rows: list[sqlite3.Row]) -> list[int]:
     return [row["listing_id"] for row in rows]
 
 
-def test_no_filters_returns_everything(seeded: sqlite3.Connection) -> None:
-    assert len(db.query_listings(seeded, db.Filters())) == 3
-
-
-@pytest.mark.parametrize(
-    ("filters", "expected"),
-    [
-        (db.Filters(price_max=290_000), [1]),
-        (db.Filters(price_min=290_000), [2, 3]),
-        (db.Filters(area_min=80), [2, 3]),
-        (db.Filters(rooms_min=4), [2, 3]),
-        (db.Filters(beds_min=4), [2]),
-        (db.Filters(labels=("B", "C")), [2, 3]),
-        (db.Filters(hoods=("Spoorwijk",)), [1, 3]),
-        (db.Filters(q="Beeklaan"), [2]),
-        (db.Filters(price_min=290_000, area_min=90), [2]),
-    ],
-)
-def test_filters(
-    seeded: sqlite3.Connection, filters: db.Filters, expected: list[int]
+def test_the_index_holds_every_house_with_its_card_extras(
+    seeded: sqlite3.Connection,
 ) -> None:
-    assert sorted(ids(db.query_listings(seeded, filters))) == expected
+    rows = db.browse_index(seeded, db.BUY)
+    assert ids(rows) == [1, 2, 3]
+    assert list(rows[0].keys()) == list(db.INDEX_COLUMNS)
 
 
-def test_delisted_are_hidden_by_default(seeded: sqlite3.Connection) -> None:
+def test_the_index_ships_delisted_houses_flagged(seeded: sqlite3.Connection) -> None:
+    # "Include houses that left this search" is a browser-side filter, so the
+    # index cannot leave them out.
     with seeded:
         seeded.execute(
             "UPDATE listings SET delisted_at = '2026-05-01' WHERE listing_id = 1"
         )
-    assert sorted(ids(db.query_listings(seeded, db.Filters()))) == [2, 3]
-    assert len(db.query_listings(seeded, db.Filters(include_delisted=True))) == 3
+    rows = {row["listing_id"]: row for row in db.browse_index(seeded, db.BUY)}
+    assert rows[1]["delisted_at"] == "2026-05-01"
+    assert rows[2]["delisted_at"] is None
+
+
+def test_the_index_carries_the_first_photo(conn: sqlite3.Connection) -> None:
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=1, photo_ids=("t/a", "t/b")))
+    assert db.browse_index(conn, db.BUY)[0]["first_image"] == "t/a"
 
 
 @pytest.mark.parametrize(
-    ("sort", "expected"),
-    [("price_asc", [1, 2, 3]), ("price_desc", [3, 2, 1]), ("area_desc", [2, 3, 1])],
+    ("q", "expected"),
+    [("Beeklaan", [2]), ("spoorwijk", [1, 3]), ("zzz", [])],
 )
-def test_sorting(seeded: sqlite3.Connection, sort: str, expected: list[int]) -> None:
-    assert ids(db.query_listings(seeded, db.Filters(sort=sort))) == expected
-
-
-def test_an_unknown_sort_falls_back_instead_of_raising(
-    seeded: sqlite3.Connection,
+def test_search_matches_address_and_buurt(
+    seeded: sqlite3.Connection, q: str, expected: list[int]
 ) -> None:
-    # The sort key arrives from a query string, so it cannot be trusted.
-    assert (
-        len(db.query_listings(seeded, db.Filters(sort="'; DROP TABLE listings--"))) == 3
-    )
+    assert db.search_ids(seeded, db.BUY, q) == expected
 
 
-def test_listings_without_a_price_sort_last(conn: sqlite3.Connection) -> None:
-    with conn:
-        db.upsert_listing(conn, make_listing(listing_id=1, price=None))
-        db.upsert_listing(conn, make_listing(listing_id=2, price=250_000))
-    assert ids(db.query_listings(conn, db.Filters(sort="price_asc"))) == [2, 1]
+def test_search_reaches_descriptions(seeded: sqlite3.Connection) -> None:
+    # The reason the endpoint exists: descriptions are not in the index.
+    with seeded:
+        db.save_detail(seeded, detail_for(2))
+        seeded.execute(
+            "UPDATE listings SET description = 'Ruime tuin op het zuiden' "
+            "WHERE listing_id = 2"
+        )
+    assert db.search_ids(seeded, db.BUY, "tuin") == [2]
 
 
 def test_a_quote_in_the_search_text_is_bound_not_interpolated(
     seeded: sqlite3.Connection,
 ) -> None:
-    assert db.query_listings(seeded, db.Filters(q="' OR 1=1 --")) == []
-
-
-def test_count_matches_the_query(seeded: sqlite3.Connection) -> None:
-    filters = db.Filters(hoods=("Spoorwijk",))
-    assert db.count_listings(seeded, filters) == len(db.query_listings(seeded, filters))
-
-
-def test_pagination_does_not_repeat_rows(seeded: sqlite3.Connection) -> None:
-    first = ids(db.query_listings(seeded, db.Filters(sort="price_asc"), limit=2))
-    second = ids(
-        db.query_listings(seeded, db.Filters(sort="price_asc"), limit=2, offset=2)
-    )
-    assert first == [1, 2]
-    assert second == [3]
-
-
-def test_facets_come_from_the_data(seeded: sqlite3.Connection) -> None:
-    assert db.price_bounds(seeded) == (260_000, 345_000)
-    assert db.area_bounds(seeded) == (60, 100)
-    assert db.label_counts(seeded) == {"E": 1, "B": 1, "C": 1}
-    assert db.distinct_neighbourhoods(seeded) == ["Centrum", "Spoorwijk"]
+    assert db.search_ids(seeded, db.BUY, "' OR 1=1 --") == []
 
 
 # --- run bookkeeping -------------------------------------------------------
@@ -640,38 +609,15 @@ def seed_both(conn: sqlite3.Connection) -> None:
         )  # fmt: skip
 
 
-def test_a_query_only_ever_sees_one_offering_type(conn: sqlite3.Connection) -> None:
+def test_the_index_only_ever_sees_one_offering_type(conn: sqlite3.Connection) -> None:
     seed_both(conn)
-    buys = db.query_listings(conn, db.Filters(offering_type="buy"))
-    rents = db.query_listings(conn, db.Filters(offering_type="rent"))
-    assert [r["listing_id"] for r in buys] == [1, 2]
-    assert [r["listing_id"] for r in rents] == [3, 4]
+    assert ids(db.browse_index(conn, "buy")) == [1, 2]
+    assert ids(db.browse_index(conn, "rent")) == [3, 4]
 
 
-def test_the_default_filter_is_buy(conn: sqlite3.Connection) -> None:
-    # Every existing caller predates rentals, so the default must not widen.
+def test_search_only_ever_sees_one_offering_type(conn: sqlite3.Connection) -> None:
     seed_both(conn)
-    assert db.Filters().offering_type == "buy"
-    assert db.count_listings(conn, db.Filters()) == 2
-
-
-def test_price_bounds_never_span_both_scales(conn: sqlite3.Connection) -> None:
-    """The concrete failure this scoping exists to prevent.
-
-    Unscoped, the slider would run from 1 500 to 600 000 and be unusable for
-    either mode.
-    """
-    seed_both(conn)
-    assert db.price_bounds(conn, "buy") == (400_000, 600_000)
-    assert db.price_bounds(conn, "rent") == (1500, 2200)
-
-
-def test_area_and_label_counts_are_scoped(conn: sqlite3.Connection) -> None:
-    seed_both(conn)
-    assert db.area_bounds(conn, "buy") == (80, 100)
-    assert db.area_bounds(conn, "rent") == (60, 90)
-    assert sum(db.label_counts(conn, "buy").values()) == 2
-    assert sum(db.label_counts(conn, "rent").values()) == 2
+    assert db.search_ids(conn, "rent", "straat") == [3, 4]
 
 
 def test_counts_can_scope_or_span(conn: sqlite3.Connection) -> None:

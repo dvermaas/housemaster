@@ -1,12 +1,14 @@
-"""Tests for the browse app.
+"""Tests for the web app: the JSON API, and the shell that serves the SPA.
 
 Flask's built-in test client, against a seeded temporary cache. No new
-dependency, no network, no running server.
+dependency, no network, no running server. The front end has its own tests
+(`npm test` in frontend/); these cover what the browser is handed.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import gzip
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from xml.etree import ElementTree
@@ -16,11 +18,11 @@ from flask.testing import FlaskClient
 
 from housemaster import db
 from housemaster.models import Boundary, Detail, Feature
-from housemaster.web import create_app, filters, views
+from housemaster.web import create_app
 
 from .test_models import make_listing
 
-HX = {"HX-Request": "true"}
+FAVICON = Path(__file__).resolve().parents[1] / "frontend/public/favicon.svg"
 
 
 @pytest.fixture
@@ -92,330 +94,161 @@ def cache(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client(cache: Path) -> Iterator[FlaskClient]:
-    app = create_app(cache)
+def dist(tmp_path: Path) -> Path:
+    """A stand-in for `npm run build`: a shell and one hashed asset."""
+    root = tmp_path / "dist"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text('<!doctype html><div id="root"></div>' + " " * 2048)
+    (root / "assets" / "index-abc123.js").write_text("console.log(1);" * 200)
+    (root / "favicon.svg").write_text("<svg/>")
+    return root
+
+
+@pytest.fixture
+def client(cache: Path, dist: Path) -> Iterator[FlaskClient]:
+    app = create_app(cache, dist)
     app.config["TESTING"] = True
     with app.test_client() as test_client:
         yield test_client
 
 
-def body(response: object) -> str:
-    return response.get_data(as_text=True)  # type: ignore[attr-defined]
+def index_rows(client: FlaskClient, offering: str = "buy") -> dict[int, dict]:
+    payload = client.get(f"/api/index/{offering}").get_json()
+    columns = payload["columns"]
+    return {row[0]: dict(zip(columns, row, strict=True)) for row in payload["rows"]}
 
 
-# --- the browse page -------------------------------------------------------
+# --- the index -------------------------------------------------------------
 
 
-def test_the_index_renders_every_house(client: FlaskClient) -> None:
-    page = body(client.get("/"))
-    assert "Aaastraat 1" in page
-    assert "Beeklaan 2" in page
-    assert "Cederlaan 3" in page
+def test_the_index_holds_every_house_of_one_offering(client: FlaskClient) -> None:
+    payload = client.get("/api/index/buy").get_json()
+    assert payload["offering"] == "buy"
+    assert payload["columns"] == list(db.INDEX_COLUMNS)
+    assert sorted(index_rows(client)) == [1, 2, 3]
 
 
-def test_prices_are_formatted_the_way_the_cli_formats_them(client: FlaskClient) -> None:
-    assert "€ 260.000" in body(client.get("/"))
+def test_the_index_is_scoped_to_one_offering(client: FlaskClient) -> None:
+    # Price is euros to buy and euros per month to rent; one index must never
+    # hold both, or a sort would cut across two scales.
+    assert index_rows(client, "rent") == {}
 
 
-def test_the_energy_scale_shows_empty_steps_too(client: FlaskClient) -> None:
-    # The NEN ladder keeps its meaning only if unused steps still render.
-    page = body(client.get("/"))
-    assert "A+++++" in page
-    assert "disabled" in page
+def test_an_unknown_offering_is_a_404(client: FlaskClient) -> None:
+    assert client.get("/api/index/lease").status_code == 404
 
 
-# --- filtering -------------------------------------------------------------
+def test_the_index_carries_card_extras(client: FlaskClient) -> None:
+    rows = index_rows(client)
+    assert rows[1]["first_image"] == "tiara/a"
+    assert rows[3]["price_was"] == 300_000  # came down to 275 000
+    assert rows[2]["price_was"] is None
 
 
-def test_a_price_filter_excludes_non_matching_houses(client: FlaskClient) -> None:
-    page = body(client.get("/?price_max=280000"))
-    assert "Aaastraat 1" in page
-    # A negative assertion catches a broken WHERE that a positive one misses.
-    assert "Beeklaan 2" not in page
+def test_times_travel_as_epoch_seconds(client: FlaskClient) -> None:
+    rows = index_rows(client)
+    assert rows[1]["published"] == 1_788_503_400  # 2026-09-04T06:30:00Z
+    assert isinstance(rows[1]["first_seen_at"], int)
 
 
-@pytest.mark.parametrize(
-    ("query", "present", "absent"),
-    [
-        ("?area_min=100", "Beeklaan 2", "Aaastraat 1"),
-        ("?label=B", "Beeklaan 2", "Aaastraat 1"),
-        ("?hood=Spoorwijk", "Aaastraat 1", "Beeklaan 2"),
-        ("?q=Beeklaan", "Beeklaan 2", "Aaastraat 1"),
-        ("?beds_min=4", "Beeklaan 2", "Aaastraat 1"),
-    ],
-)
-def test_filters(client: FlaskClient, query: str, present: str, absent: str) -> None:
-    page = body(client.get(f"/{query}"))
-    assert present in page
-    assert absent not in page
-
-
-def test_sorting_reorders_the_grid(client: FlaskClient) -> None:
-    page = body(client.get("/?sort=price_desc"))
-    assert page.index("Beeklaan 2") < page.index("Aaastraat 1")
-
-
-def test_a_junk_number_renders_instead_of_crashing(client: FlaskClient) -> None:
-    # Hand-edited URLs must degrade to "no filter", not to a 500.
-    response = client.get("/?price_min=abc&area_max=%20&page=xyz")
-    assert response.status_code == 200
-    assert "Aaastraat 1" in body(response)
-
-
-def test_an_injection_attempt_in_the_sort_falls_back(client: FlaskClient) -> None:
-    response = client.get("/?sort=price';DROP TABLE listings--")
-    assert response.status_code == 200
-    assert "Aaastraat 1" in body(response)
-
-
-def test_no_matches_gives_a_useful_empty_state(client: FlaskClient) -> None:
-    page = body(client.get("/?price_min=9000000"))
-    assert "No houses match" in page
-    # Filters can arrive from a previous visit, so the way out has to be here
-    # and not only at the foot of the rail.
-    assert "clear all filters" in page
-    assert 'class="reset"' in page
-
-
-# --- htmx ------------------------------------------------------------------
-
-
-def test_an_htmx_request_returns_only_the_fragment(client: FlaskClient) -> None:
-    page = body(client.get("/", headers=HX))
-    assert "<!doctype" not in page.lower()
-    assert 'id="results"' in page
-    assert "Aaastraat 1" in page
-
-
-def test_a_history_restore_returns_the_full_page(client: FlaskClient) -> None:
-    # htmx sends HX-Request when restoring from its cache; answering with a
-    # fragment there leaves the user on a blank page.
-    page = body(client.get("/", headers={**HX, "HX-History-Restore-Request": "true"}))
-    assert "<!doctype" in page.lower()
-
-
-def test_a_plain_request_returns_a_whole_document(client: FlaskClient) -> None:
-    assert "<!doctype" in body(client.get("/")).lower()
-
-
-def test_the_more_route_returns_cards_without_the_shell(client: FlaskClient) -> None:
-    page = body(client.get("/more?page=1"))
-    assert "<!doctype" not in page.lower()
-    assert 'class="rail"' not in page
-
-
-def test_the_sentinel_overrides_every_inherited_htmx_attribute(
-    client: FlaskClient, cache: Path
-) -> None:
-    # The sentinel sits inside the filter form, and htmx attributes inherit.
-    # Without these overrides it adopts the form's target/select/push-url,
-    # swaps nothing, and navigates the address bar to /more.
+def test_delisting_travels_as_a_flag(cache: Path, client: FlaskClient) -> None:
     conn = db.connect(cache)
     with conn:
-        for listing_id in range(10, 50):
-            db.upsert_listing(conn, make_listing(listing_id=listing_id))
+        conn.execute(
+            "UPDATE listings SET delisted_at = '2026-05-01' WHERE listing_id = 2"
+        )
     conn.close()
-
-    page = body(client.get("/"))
-    sentinel = page[page.index('class="sentinel"') :]
-    sentinel = sentinel[: sentinel.index(">")]
-    assert 'hx-target="this"' in sentinel
-    assert 'hx-select="unset"' in sentinel
-    assert 'hx-push-url="false"' in sentinel
-    assert 'hx-swap="outerHTML"' in sentinel
+    rows = index_rows(client)
+    assert rows[2]["delisted_at"] == 1
+    assert rows[1]["delisted_at"] == 0
 
 
-# --- theme and lightbox ----------------------------------------------------
+def test_the_index_carries_the_map_scale_and_counts(client: FlaskClient) -> None:
+    meta = client.get("/api/index/buy").get_json()["meta"]
+    assert meta["counts"]["total"] == 3
+    assert meta["counts"]["boundaries"] == 1
+    assert meta["hood_scale"] == [3929] * 6
 
 
-def test_every_page_carries_the_theme_toggle(client: FlaskClient) -> None:
-    for path in ("/", "/?view=map", "/house/1"):
-        assert 'id="theme-toggle"' in body(client.get(path)), path
+def test_the_index_is_gzipped_when_asked(client: FlaskClient) -> None:
+    response = client.get("/api/index/buy", headers={"Accept-Encoding": "gzip"})
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert json.loads(gzip.decompress(response.data))["offering"] == "buy"
 
 
-def test_the_theme_is_applied_before_first_paint(client: FlaskClient) -> None:
-    # A stored preference read after the stylesheet would flash the wrong theme.
-    page = body(client.get("/"))
-    head = page[: page.index("</head>")]
-    assert "housemaster-theme" in head
-    assert head.index("housemaster-theme") < head.index("app.css")
+def test_a_warm_client_gets_a_304(client: FlaskClient) -> None:
+    first = client.get("/api/index/buy")
+    assert first.headers["Cache-Control"] == "no-cache"
+    again = client.get("/api/index/buy", headers={"If-None-Match": first.headers["ETag"]})
+    assert again.status_code == 304
+    assert again.data == b""
 
 
-def test_gallery_photos_no_longer_open_a_new_tab(client: FlaskClient) -> None:
-    gallery = body(client.get("/house/1"))
-    start = gallery.index('class="gallery"')
-    assert 'target="_blank"' not in gallery[start : start + 900]
+def test_a_write_changes_the_etag(cache: Path, client: FlaskClient) -> None:
+    # The whole point of the in-process cache is that it is never stale: the
+    # next fetch has to reach a client that revalidates.
+    before = client.get("/api/index/buy").headers["ETag"]
+    conn = db.connect(cache)
+    with conn:
+        db.upsert_listing(conn, make_listing(listing_id=4, address="Dijkweg 4"))
+    conn.close()
+    after = client.get("/api/index/buy", headers={"If-None-Match": before})
+    assert after.status_code == 200
+    assert 4 in index_rows(client)
 
 
-def test_gallery_links_still_work_without_javascript(client: FlaskClient) -> None:
-    # The href is the fallback; lightbox.js only intercepts the click.
-    page = body(client.get("/house/1"))
-    assert "cloud.funda.nl" in page[page.index('class="gallery"') :]
+# --- search ----------------------------------------------------------------
 
 
-def test_the_lightbox_shell_is_present_and_hidden(client: FlaskClient) -> None:
-    page = body(client.get("/house/1"))
-    assert 'id="lightbox"' in page
-    assert 'aria-modal="true"' in page
-    at = page.index('id="lightbox"')
-    assert "hidden" in page[at : at + 200]
+def test_search_reaches_descriptions(client: FlaskClient) -> None:
+    # Descriptions are not in the index, so this is the only way to them.
+    assert client.get("/api/search/buy?q=licht").get_json()["ids"] == [1]
 
 
-def test_pale_energy_chips_carry_their_label_for_contrast(client: FlaskClient) -> None:
-    # White on the yellow end of the NEN scale is unreadable; the CSS keys off
-    # data-label to give C and D dark ink instead.
-    assert 'data-label="B"' in body(client.get("/"))
+def test_search_matches_addresses_too(client: FlaskClient) -> None:
+    assert client.get("/api/search/buy?q=beeklaan").get_json()["ids"] == [2]
 
 
-# --- the map view ----------------------------------------------------------
+def test_an_empty_search_matches_nothing(client: FlaskClient) -> None:
+    assert client.get("/api/search/buy?q=%20").get_json()["ids"] == []
 
 
-def test_the_map_view_replaces_the_grid_but_keeps_the_rail(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    assert 'id="map"' in page
-    assert 'class="rail"' in page  # filters stay
-    assert 'class="grid"' not in page  # cards do not
+def test_search_is_scoped_to_one_offering(client: FlaskClient) -> None:
+    assert client.get("/api/search/rent?q=licht").get_json()["ids"] == []
 
 
-def test_the_map_node_is_preserved_across_swaps(client: FlaskClient) -> None:
-    # Without hx-preserve the MapLibre instance is rebuilt on every filter
-    # change and the viewport the user panned to is lost.
-    assert "hx-preserve" in body(client.get("/?view=map"))
+# --- one house -------------------------------------------------------------
 
 
-def test_the_view_travels_with_the_filter_form(client: FlaskClient) -> None:
-    # The form serialises everything inside it; without this hidden field,
-    # changing a filter on the map drops you back to the grid.
-    page = body(client.get("/?view=map"))
-    assert '<input type="hidden" name="view" value="map">' in page
+def test_a_house_carries_its_detail(client: FlaskClient) -> None:
+    payload = client.get("/api/house/1").get_json()
+    assert payload["listing"]["address"] == "Aaastraat 1"
+    assert payload["listing"]["description"] == "Ruim en licht appartement."
+    assert payload["features"] == [
+        {"group": "Bouw", "label": "Bouwjaar", "value": "1931-1944"}
+    ]
 
 
-def test_filtering_on_the_map_stays_on_the_map(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map&price_max=280000", headers=HX))
-    assert 'data-view="map"' in page
-    assert 'id="map"' in page
+def test_photos_are_cdn_ids_not_urls(client: FlaskClient) -> None:
+    # Hotlinked, never downloaded: the browser builds the CDN URL itself.
+    assert client.get("/api/house/1").get_json()["photos"] == ["tiara/a", "tiara/b"]
 
 
-def test_the_map_carries_its_data_url_and_bounds(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    assert "houses.geojson" in page
-    assert "data-bounds=" in page
-
-
-def test_geojson_is_valid_and_filtered(client: FlaskClient) -> None:
-    everything = client.get("/houses.geojson").get_json()
-    assert everything["type"] == "FeatureCollection"
-    assert len(everything["features"]) == 1  # only house 1 has coordinates
-
-    feature = everything["features"][0]
-    assert feature["geometry"]["type"] == "Point"
-    # GeoJSON is lng,lat -- the reverse of how the rest of the code says it.
-    assert feature["geometry"]["coordinates"] == [4.31, 52.05]
-    assert feature["properties"]["id"] == 1
-
-    none = client.get("/houses.geojson?price_min=9000000").get_json()
-    assert none["features"] == []
-
-
-def test_houses_without_coordinates_are_omitted(client: FlaskClient) -> None:
-    # Houses 2 and 3 were never enriched, so they have no lat/lng.
-    payload = client.get("/houses.geojson").get_json()
-    ids = {f["properties"]["id"] for f in payload["features"]}
-    assert ids == {1}
-
-
-def test_bounds_are_none_when_nothing_matches(cache: Path) -> None:
-    conn = db.connect(cache, read_only=True)
-    try:
-        assert db.map_bounds(conn, db.Filters(price_min=9_000_000)) is None
-    finally:
-        conn.close()
-
-
-def test_the_popup_card_renders_a_house(client: FlaskClient) -> None:
-    page = body(client.get("/house/1/card"))
-    assert "<!doctype" not in page.lower()  # a fragment, not a page
-    assert "Aaastraat 1" in page
-    assert "€ 260.000" in page
-    assert "cloud.funda.nl/tiara/a" in page  # hotlinked straight from funda
-
-
-def test_an_unknown_popup_card_is_a_404(client: FlaskClient) -> None:
-    assert client.get("/house/999999/card").status_code == 404
-
-
-def test_an_unknown_view_falls_back_to_the_grid(client: FlaskClient) -> None:
-    page = body(client.get("/?view=../../etc/passwd"))
-    assert 'data-view="grid"' in page
-
-
-# --- the detail page -------------------------------------------------------
-
-
-def test_a_house_page_shows_its_detail_fields(client: FlaskClient) -> None:
-    page = body(client.get("/house/1"))
-    assert "Ruim en licht appartement." in page
-    assert "Bouwjaar" in page
-    assert "1931-1944" in page
-    assert "Spoorwijk" in page
-
-
-def test_a_house_page_shows_the_publish_time_in_local_time(client: FlaskClient) -> None:
-    # Stored as 06:30 UTC; Amsterdam is +02:00 in September.
-    assert "<dd>2026-09-04 08:30</dd>" in body(client.get("/house/1"))
-
-
-def test_a_card_shows_only_the_publish_date(client: FlaskClient) -> None:
-    page = body(client.get("/"))
-    assert '<span class="listed">2026-09-04</span>' in page
-
-
-def test_a_house_page_shows_neighbourhood_context(client: FlaskClient) -> None:
-    assert "€ 3.929" in body(client.get("/house/1"))
-
-
-def test_a_price_drop_is_shown_with_its_history(client: FlaskClient) -> None:
-    page = body(client.get("/house/3"))
-    assert "Price history" in page
-    assert "€ 300.000" in page
-    assert "€ 275.000" in page
+def test_price_history_keeps_its_surrogate_key(client: FlaskClient) -> None:
+    history = client.get("/api/house/3").get_json()["history"]
+    assert [row["price"] for row in history] == [300_000, 275_000]
+    assert len({row["id"] for row in history}) == 2
 
 
 def test_an_unknown_house_is_a_404(client: FlaskClient) -> None:
-    assert client.get("/house/999999").status_code == 404
-
-
-def test_every_gallery_photo_is_hotlinked(client: FlaskClient) -> None:
-    # Nothing is stored, so every photo on the page is a CDN URL and the app
-    # serves no image bytes of its own.
-    page = body(client.get("/house/1"))
-    assert "cloud.funda.nl/tiara/a" in page
-    assert "cloud.funda.nl/tiara/b" in page
-    assert "/media/" not in page
-
-
-# --- the app itself --------------------------------------------------------
-
-
-def test_a_relative_db_path_is_resolved(
-    cache: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Flask resolves a relative path against its own package directory, so
-    # `serve` run from a project root would look for the cache in the wrong
-    # place entirely.
-    monkeypatch.chdir(cache.parent)
-    app = create_app(Path("test.db"))
-    app.config["TESTING"] = True
-    assert app.config["DB_PATH"].is_absolute()
-    with app.test_client() as relative_client:
-        assert relative_client.get("/").status_code == 200
+    assert client.get("/api/house/999").status_code == 404
 
 
 # --- the buurt overlay -----------------------------------------------------
 
 
 def test_the_outline_feed_is_geojson_with_the_price_level(client: FlaskClient) -> None:
-    payload = client.get("/neighbourhoods.geojson").get_json()
+    payload = client.get("/api/neighbourhoods.geojson").get_json()
     assert payload["type"] == "FeatureCollection"
     feature = payload["features"][0]
     assert feature["geometry"]["type"] == "Polygon"
@@ -424,254 +257,80 @@ def test_the_outline_feed_is_geojson_with_the_price_level(client: FlaskClient) -
     assert feature["id"] == 0
 
 
-def test_the_outline_feed_ignores_filters(client: FlaskClient) -> None:
-    # Geography, not data: narrowing the price range must not remove outlines.
-    wide = client.get("/neighbourhoods.geojson").get_json()
-    narrow = client.get("/neighbourhoods.geojson?price_max=1").get_json()
-    assert len(narrow["features"]) == len(wide["features"]) == 1
-
-
-def test_the_map_view_carries_what_the_overlay_needs(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    assert 'data-shapes="/neighbourhoods.geojson"' in page
-    assert 'data-hood-scale="3929,3929,3929,3929,3929,3929"' in page
-    assert 'id="hood-toggle"' in page
-
-
-def test_the_toggle_is_outside_the_filter_form(client: FlaskClient) -> None:
-    # It changes what the map draws, not what gets submitted. If it ever became
-    # a named control inside #results it would start round-tripping as a filter.
-    page = body(client.get("/?view=map"))
-    toggle = page[page.index('id="hood-toggle"') - 200 : page.index('id="hood-toggle"')]
-    assert "name=" not in toggle
-
-
-def test_the_ramp_legend_reads_from_the_same_range(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    assert 'id="hood-ramp"' in page
-    assert "3.929" in page  # compact-formatted, matching the layer's domain
-
-
-def test_the_grid_view_does_not_ship_the_overlay(client: FlaskClient) -> None:
-    assert 'id="hood-toggle"' not in body(client.get("/"))
-
-
-# --- what the map admits it is not showing ---------------------------------
-
-
-def test_the_map_geojson_url_ignores_sort(client: FlaskClient) -> None:
-    """A map has no reading order.
-
-    Leaving `sort` in the URL changed it on every sort change, so MapLibre
-    refetched and redrew the whole source for nothing -- which during an active
-    fetch looked like houses randomly appearing and vanishing.
-    """
-    page = body(client.get("/?view=map&sort=price_desc"))
-    start = page.index("data-geojson=")
-    url = page[start : page.index('"', start + 14) + 1]
-    assert "sort" not in url
-
-
-def test_the_sort_control_is_hidden_on_the_map(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    label = page[page.index('class="sort"') : page.index('class="sort"') + 60]
-    assert "hidden" in label
-    # ...but still present in the grid.
-    grid = body(client.get("/"))
-    label = grid[grid.index('class="sort"') : grid.index('class="sort"') + 60]
-    assert "hidden" not in label
-
-
-def test_the_map_says_when_houses_lack_coordinates(client: FlaskClient) -> None:
-    # Only house 1 has a detail page in the fixture, so 1 of 3 is mappable.
-    page = body(client.get("/?view=map"))
-    assert "mapnote" in page
-    assert "have coordinates" in page
-
-
-def test_no_note_when_the_map_shows_everything(client: FlaskClient) -> None:
-    # Narrow to the one house that does have coordinates.
-    page = body(client.get("/?view=map&q=Aaastraat"))
-    assert "mapnote" not in page
-
-
-def test_the_buurt_toggle_is_disabled_without_outlines(
-    cache: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_outline_feed_ignores_delisting(cache: Path, client: FlaskClient) -> None:
+    # Geography, not data: outlines must not blink out as houses come and go.
     conn = db.connect(cache)
     with conn:
-        conn.execute("DELETE FROM boundaries")
+        conn.execute("UPDATE listings SET delisted_at = '2026-05-01'")
     conn.close()
-    app = create_app(cache)
+    assert len(client.get("/api/neighbourhoods.geojson").get_json()["features"]) == 1
+
+
+# --- the app shell ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/", "/house/1", "/house/999", "/anything/else"])
+def test_every_client_route_gets_the_shell(client: FlaskClient, path: str) -> None:
+    # A reload or a shared link on any client-side route must land on the app.
+    response = client.get(path)
+    assert response.status_code == 200
+    assert b'id="root"' in response.data
+    assert response.headers["Cache-Control"] == "no-cache"
+
+
+def test_filters_in_the_query_string_still_get_the_shell(client: FlaskClient) -> None:
+    assert client.get("/?label=A&label=B&view=map").status_code == 200
+
+
+def test_hashed_assets_are_cached_for_good(client: FlaskClient) -> None:
+    response = client.get("/assets/index-abc123.js")
+    assert response.status_code == 200
+    assert "immutable" in response.headers["Cache-Control"]
+    assert response.mimetype in {"text/javascript", "application/javascript"}
+
+
+def test_assets_are_gzipped_when_asked(client: FlaskClient) -> None:
+    response = client.get("/assets/index-abc123.js", headers={"Accept-Encoding": "gzip"})
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert gzip.decompress(response.data).startswith(b"console.log")
+
+
+def test_a_stale_asset_is_a_404_not_the_shell(client: FlaskClient) -> None:
+    # An old tab asking for last build's chunk must fail loudly, not be handed
+    # HTML that then fails to parse as JavaScript.
+    assert client.get("/assets/index-old999.js").status_code == 404
+
+
+def test_an_unknown_api_path_is_a_json_404(client: FlaskClient) -> None:
+    response = client.get("/api/nope")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not found"}
+
+
+def test_the_shell_cannot_be_walked_out_of(client: FlaskClient, cache: Path) -> None:
+    response = client.get("/../test.db")
+    assert b"SQLite" not in response.data
+
+
+def test_an_unbuilt_app_says_how_to_build_it(cache: Path, tmp_path: Path) -> None:
+    app = create_app(cache, tmp_path / "nowhere")
+    response = app.test_client().get("/")
+    assert response.status_code == 503
+    assert b"npm run build" in response.data
+
+
+def test_a_relative_db_path_is_resolved(
+    cache: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Flask resolves a relative path against its own package directory, so
+    # `serve` run from a project root would look for the cache in the wrong
+    # place entirely.
+    monkeypatch.chdir(cache.parent)
+    app = create_app(Path("test.db"), dist)
     app.config["TESTING"] = True
-    with app.test_client() as bare:
-        page = bare.get("/?view=map").get_data(as_text=True)
-    toggle = page[page.index('id="hood-toggle"') : page.index('id="hood-toggle"') + 260]
-    assert "disabled" in toggle
-
-
-def test_the_buurt_toggle_is_enabled_once_outlines_exist(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map"))
-    toggle = page[page.index('id="hood-toggle"') : page.index('id="hood-toggle"') + 260]
-    assert "disabled" not in toggle
-
-
-def test_the_hidden_attribute_actually_hides() -> None:
-    """Load-bearing and invisible, so pinned here.
-
-    The UA rule for `[hidden]` is `display: none`, which any author `display:`
-    beats. Every toggle in the map chrome uses the attribute, so without this
-    override the sort control and the ramp legend stayed on screen while
-    reporting `hidden === true`.
-    """
-    css = (
-        Path(__file__).resolve().parents[1] / "src/housemaster/web/static/app.css"
-    ).read_text(encoding="utf-8")
-    assert "[hidden] { display: none !important; }" in css
-
-
-# --- clearing filters ------------------------------------------------------
-
-
-def test_clearing_filters_keeps_you_on_the_map(client: FlaskClient) -> None:
-    page = body(client.get("/?view=map&price_min=300000"))
-    start = page.index('class="reset"')
-    link = page[start : page.index("</a>", start)]
-    assert "view=map" in link
-    # ...and it really does drop the filters.
-    assert "price_min" not in link
-
-
-def test_clearing_filters_on_the_grid_is_a_bare_path(client: FlaskClient) -> None:
-    page = body(client.get("/?price_min=300000"))
-    start = page.index('class="reset"')
-    link = page[start : page.index("</a>", start)]
-    assert 'href="/"' in link
-
-
-def test_the_rail_reset_is_corrected_after_a_view_swap(client: FlaskClient) -> None:
-    """The rail is not re-rendered by an htmx swap, so nav.js fixes it.
-
-    Server-side rendering covers the full page load and the no-JS path; this
-    pins the fact that something has to handle the swapped case too.
-    """
-    page = body(client.get("/"))
-    assert "nav.js" in page
-
-
-# --- buy vs rent -----------------------------------------------------------
-
-
-def test_the_mode_switch_is_present_and_defaults_to_buy(client: FlaskClient) -> None:
-    page = body(client.get("/"))
-    assert 'class="offering"' in page
-    assert 'data-offering="buy"' in page
-
-
-def test_switching_mode_drops_the_price_bounds(client: FlaskClient) -> None:
-    """The trap: a 0-1800 rent range is meaningless for buying.
-
-    Carrying price_min/price_max across the switch would silently filter one
-    market with the other's numbers.
-    """
-    page = body(client.get("/?price_min=250000&price_max=350000"))
-    start = page.index('class="offering"')
-    control = page[start : page.index("</div>", start)]
-    assert "offering=rent" in control
-    assert "price_min" not in control
-    assert "price_max" not in control
-
-
-def test_other_filters_survive_the_switch(client: FlaskClient) -> None:
-    page = body(client.get("/?rooms_min=3&view=map"))
-    start = page.index('class="offering"')
-    control = page[start : page.index("</div>", start)]
-    assert "rooms_min=3" in control
-    assert "view=map" in control
-
-
-def test_the_offering_is_carried_in_the_form(client: FlaskClient) -> None:
-    # Inside #results, so it is reserialised on every swap like `view`.
-    page = body(client.get("/?offering=rent"))
-    marker = '<input type="hidden" name="offering" value="rent">'
-    assert marker in page
-    assert page.index('id="results"') < page.index(marker)
-
-
-def test_clearing_filters_keeps_the_mode(client: FlaskClient) -> None:
-    page = body(client.get("/?offering=rent&price_min=1000"))
-    start = page.index('class="reset"')
-    link = page[start : page.index("</a>", start)]
-    assert "offering=rent" in link
-    assert "price_min" not in link
-
-
-def test_an_unknown_offering_falls_back_to_buy(client: FlaskClient) -> None:
-    assert 'data-offering="buy"' in body(client.get("/?offering=../etc/passwd"))
-
-
-def test_the_price_legend_follows_the_mode(client: FlaskClient) -> None:
-    assert "Asking price" in body(client.get("/"))
-    assert "Rent per month" in body(client.get("/?offering=rent"))
-
-
-def test_a_rental_per_m2_figure_says_it_is_monthly(client: FlaskClient) -> None:
-    """Unqualified, "EUR 19/m2" beside a purchase page's "EUR 5.629/m2" reads
-    as an absurd bargain rather than a monthly rate."""
-    assert filters.per_m2("rent") == "/m² p/mnd"
-    assert filters.per_m2("buy") == "/m²"
-    # And a purchase card is left alone.
-    assert "p/mnd" not in body(client.get("/"))
-
-
-# --- remembered filters ----------------------------------------------------
-
-
-def test_every_filter_key_actually_filters() -> None:
-    """A key that no longer does anything would be stored and never restored."""
-    app = create_app(Path("unused.db"))
-    # `delisted` is a checkbox and only responds to its own value.
-    sample = {"delisted": "1"}
-    for key in views.FILTER_KEYS:
-        with app.test_request_context(f"/?{key}={sample.get(key, '3')}"):
-            assert views.filters_from_args() != db.Filters(), key
-
-
-def test_the_filter_key_list_covers_every_filter() -> None:
-    """Canary against the opposite drift: a new filter nobody remembers.
-
-    `Filters` carries one field per filter plus `offering_type`, which is a
-    property of the page rather than of the filter set.
-    """
-    assert len(views.FILTER_KEYS) == len(dataclasses.fields(db.Filters)) - 1
-
-
-def test_page_properties_are_not_stored_as_filters() -> None:
-    # Storing `page` would restore someone to page 5 of a search they left.
-    for key in ("view", "offering", "page"):
-        assert key not in views.FILTER_KEYS
-
-
-def test_the_markup_carries_the_filter_keys(client: FlaskClient) -> None:
-    # The browser reads the list from here rather than keeping its own copy.
-    page = body(client.get("/"))
-    assert f'data-filter-keys="{",".join(views.FILTER_KEYS)}"' in page
-
-
-def test_the_restore_script_runs_before_the_body(client: FlaskClient) -> None:
-    page = body(client.get("/"))
-    head = page[: page.index("</head>")]
-    assert "housemaster-filters-v1" in head
-
-
-def test_the_restore_script_knows_which_side_it_is_on(client: FlaskClient) -> None:
-    assert '"housemaster-filters-v1:" + "rent"' in body(client.get("/?offering=rent"))
-    assert '"housemaster-filters-v1:" + "buy"' in body(client.get("/"))
-
-
-def test_a_house_page_carries_no_restore_script(client: FlaskClient) -> None:
-    # It has no filter context, and redirecting away from a house would be rude.
-    assert "housemaster-filters-v1" not in body(client.get("/house/1"))
+    assert app.config["DB_PATH"].is_absolute()
+    with app.test_client() as relative_client:
+        assert relative_client.get("/api/index/buy").status_code == 200
 
 
 # --- favicon ---------------------------------------------------------------
@@ -683,20 +342,14 @@ def test_the_favicon_is_well_formed_xml() -> None:
     The first version shipped a double hyphen inside an XML comment, which is
     illegal and which nothing warns about until you look at a tab.
     """
-    icon = Path(__file__).resolve().parents[1] / "src/housemaster/web/static/favicon.svg"
     # S314 is about untrusted input; this file is in the repository.
-    ElementTree.parse(icon)  # noqa: S314 - raises ParseError if malformed
-    assert "--" not in icon.read_text(encoding="utf-8").split("<style>")[0].replace(
+    ElementTree.parse(FAVICON)  # noqa: S314 - raises ParseError if malformed
+    assert "--" not in FAVICON.read_text(encoding="utf-8").split("<style>")[0].replace(
         "<!--", ""
     ).replace("-->", "")
 
 
-def test_every_page_links_the_favicon(client: FlaskClient) -> None:
-    for path in ("/", "/?view=map", "/house/1"):
-        assert "favicon.svg" in body(client.get(path)), path
-
-
 def test_the_favicon_is_served(client: FlaskClient) -> None:
-    response = client.get("/static/favicon.svg")
+    response = client.get("/favicon.svg")
     assert response.status_code == 200
     assert b"<svg" in response.data

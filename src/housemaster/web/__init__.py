@@ -1,11 +1,11 @@
-"""The `serve` web app: browse and filter the cached houses.
+"""The `serve` web app: a JSON API over the cache, and the built SPA.
 
 Read-only by construction -- it opens the database read-only and never imports
 funda's fetching functions, so a page view can never hit the network. WAL means
 it keeps working while a `fetch` writes underneath it.
 
-Photos are hotlinked straight from funda's CDN, so the app serves no binary
-assets of its own and has no media directory to be pointed at.
+Photos are hotlinked straight from funda's CDN, so the app serves no images of
+its own. The front end lives in `frontend/` and builds into `dist/` here.
 """
 
 from __future__ import annotations
@@ -15,9 +15,11 @@ from pathlib import Path
 
 from flask import Flask, current_app, g
 
-from housemaster import db, photos
-from housemaster.render import euro, local_published
-from housemaster.web import filters, views
+from housemaster import db
+from housemaster.web import views
+
+DIST_DIR = Path(__file__).parent / "dist"
+"""Where `npm run build` in frontend/ writes. Shipped inside the wheel."""
 
 
 def get_conn() -> sqlite3.Connection:
@@ -34,21 +36,17 @@ def close_conn(_exception: BaseException | None = None) -> None:
         conn.close()
 
 
-def create_app(db_path: Path) -> Flask:
+def create_app(db_path: Path, dist_dir: Path | None = None) -> Flask:
     """Build the app. A factory so tests can bind it to a temporary cache."""
-    app = Flask(__name__)
+    # No Flask static folder: the shell route serves the build itself, so that
+    # every path it does not recognise can fall through to the app.
+    app = Flask(__name__, static_folder=None)
     # Resolved: Flask resolves a relative path against the *package* directory,
     # not the working directory, so `data/housemaster.db` would look in the
     # wrong place entirely.
     app.config["DB_PATH"] = Path(db_path).resolve()
-
-    app.jinja_env.filters["euro"] = euro  # the CLI's formatter, so they agree
-    app.jinja_env.filters["energy_class"] = filters.energy_class
-    app.jinja_env.filters["compact"] = filters.compact
-    app.jinja_env.filters["since"] = filters.since
-    app.jinja_env.filters["published"] = local_published
-    app.jinja_env.filters["per_m2"] = filters.per_m2
-    app.jinja_env.globals["photo_url"] = photos.photo_url
+    app.config["DIST_DIR"] = Path(dist_dir or DIST_DIR).resolve()
+    app.json.ensure_ascii = False  # type: ignore[attr-defined]  # € and m², not €
 
     app.teardown_appcontext(close_conn)
     app.register_blueprint(views.bp)

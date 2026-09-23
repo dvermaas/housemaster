@@ -40,6 +40,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/housemaster"]
+# The built front end is gitignored (it is `npm run build` output), and hatch
+# leaves gitignored files out unless told otherwise.
+artifacts = ["src/housemaster/web/dist/"]
 
 [dependency-groups]
 dev = [

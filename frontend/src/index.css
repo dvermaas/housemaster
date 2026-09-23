@@ -1,0 +1,253 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Full height under the sticky 3rem header: the filter rail and the map. */
+@utility h-below-header {
+  height: calc(100svh - 3rem);
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: "Geist Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  /* The Dutch NEN energy scale. Real colours, not theme colours: an A has to
+       look like the A on the certificate. The same in both themes for that
+       reason, and read by the map as well as by classes. */
+  --color-energy-a5: var(--energy-a5);
+  --color-energy-a4: var(--energy-a4);
+  --color-energy-a3: var(--energy-a3);
+  --color-energy-a2: var(--energy-a2);
+  --color-energy-a1: var(--energy-a1);
+  --color-energy-a: var(--energy-a);
+  --color-energy-b: var(--energy-b);
+  --color-energy-c: var(--energy-c);
+  --color-energy-d: var(--energy-d);
+  --color-energy-e: var(--energy-e);
+  --color-energy-f: var(--energy-f);
+  --color-energy-g: var(--energy-g);
+  --color-energy-unknown: var(--energy-unknown);
+  --color-energy-ink: var(--energy-ink);
+  --color-energy-ink-dark: var(--energy-ink-dark);
+  --color-choro-1: var(--choro-1);
+  --color-choro-2: var(--choro-2);
+  --color-choro-3: var(--choro-3);
+  --color-choro-4: var(--choro-4);
+  --color-choro-5: var(--choro-5);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+
+  --energy-a5: #0a6b34;
+  --energy-a4: #0a6b34;
+  --energy-a3: #12833f;
+  --energy-a2: #189a4a;
+  --energy-a1: #37ac4f;
+  --energy-a: #4caf50;
+  --energy-b: #8cc63f;
+  --energy-c: #c8d400;
+  --energy-d: #ffd500;
+  --energy-e: #fbb03b;
+  --energy-f: #f1662a;
+  --energy-g: #e30613;
+  --energy-unknown: oklch(0.85 0 0);
+  --energy-ink: #ffffff; /* on the dark greens, orange and red */
+  --energy-ink-dark: #16181c; /* on the pale yellows, C and D */
+
+  /* Buurt price choropleth, cheap to dear. Quantile bins, so five steps each
+       hold about a fifth of the buurten -- see db.neighbourhood_price_scale. */
+  --choro-1: #e8eef5;
+  --choro-2: #bcd0e3;
+  --choro-3: #85a9cb;
+  --choro-4: #4a7ba9;
+  --choro-5: #163f6b;
+  --choro-none: #c9ccc5;
+  /* See-through: streets and water have to read through the wash. A bright
+       wash over a dark basemap hides more than a dark one over a pale basemap,
+       so dark mode runs lighter. */
+  --choro-fill: 0.45;
+  --choro-fill-hover: 0.62;
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+
+  --energy-unknown: oklch(0.45 0 0);
+  --choro-1: #1f3145;
+  --choro-2: #2e4d6d;
+  --choro-3: #426e99;
+  --choro-4: #5b91c2;
+  --choro-5: #8fbde8;
+  --choro-none: #39414c;
+  --choro-fill: 0.32;
+  --choro-fill-hover: 0.5;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  html {
+    @apply font-sans;
+  }
+  /* Figures line up in columns everywhere: prices are what gets compared. */
+  body {
+    font-variant-numeric: tabular-nums;
+  }
+}
+/* MapLibre draws its own chrome outside React; these bring the popup and the
+   controls onto the theme. Plain CSS because the markup is not ours to class. */
+.housepop .maplibregl-popup-content {
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border-radius: var(--radius-lg);
+  padding: 0.75rem;
+  box-shadow: 0 8px 24px oklch(0 0 0 / 0.18);
+}
+.housepop .maplibregl-popup-close-button {
+  color: var(--muted-foreground);
+  font-size: 1.1rem;
+  padding: 0 0.4rem;
+}
+.housepop.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.housepop.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.housepop.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: var(--popover);
+}
+.housepop.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.housepop.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.housepop.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: var(--popover);
+}
+.housepop.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: var(--popover);
+}
+.housepop.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: var(--popover);
+}
+.dark .maplibregl-ctrl-group,
+.dark .maplibregl-ctrl-attrib,
+.dark .maplibregl-ctrl-scale {
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
+.dark .maplibregl-ctrl-group button + button {
+  border-top-color: var(--border);
+}
+.dark .maplibregl-ctrl button .maplibregl-ctrl-icon {
+  filter: invert(1);
+}
+.dark .maplibregl-ctrl-attrib a {
+  color: var(--muted-foreground);
+}

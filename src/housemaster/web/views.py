@@ -1,54 +1,38 @@
-"""Routes.
+"""Routes: a small JSON API, and the single-page app that reads it.
 
-`/` serves both the full page and the htmx partial, discriminated by the
-`HX-Request` header. The alternative -- a separate partial route plus
-`hx-push-url` -- pushes a URL that renders a bare fragment when the user
-reloads or bookmarks it, which is the classic htmx footgun.
+The browser does the browsing. It downloads one offering type's whole index
+once, keeps it in IndexedDB, and filters, sorts and maps it in memory -- so a
+filter change never touches the network. The server's job shrinks to handing
+over that index cheaply and answering the two questions the index cannot:
+full-text search over descriptions, and one house's detail.
+
+Everything under `/api/` is JSON. Everything else is the app shell, so a
+reload or a shared link on any client-side route still lands on the app.
 """
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import mimetypes
 import sqlite3
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from flask import (
-    Blueprint,
-    Response,
-    abort,
-    jsonify,
-    render_template,
-    request,
-    url_for,
-)
+from flask import Blueprint, Response, abort, current_app, jsonify, request
 
 from housemaster import db
-from housemaster.web.filters import ENERGY_SCALE, status_label
 
 bp = Blueprint("browse", __name__)
 
-PER_PAGE = 24
-GALLERY_PREVIEW = 5
-"""Photos shown before the rest fold away behind a disclosure."""
+MAX_QUERY = 100
+"""Search text is bound, not interpolated, but a megabyte of it is still a
+megabyte of LIKE. Nobody types more than this."""
 
-VIEWS = ("grid", "map")
-"""Two ways to look at the same filtered set. The filter rail is shared."""
-
-# Price means euros to buy and euros-per-month to rent, so the two are never
-# shown together -- this is a mode, not a filter.
-PRICE_BOUND_ARGS = ("price_min", "price_max")
-
-FILTER_KEYS = (
-    "q", "price_min", "price_max", "area_min", "area_max",
-    "rooms_min", "beds_min", "label", "hood", "status", "delisted", "sort",
-)  # fmt: skip
-"""Query parameters that narrow the result set, as opposed to `view`,
-`offering` and `page`, which are properties of the *page*.
-
-Rendered into the markup so the browser-side filter memory reads one
-definition rather than keeping its own copy in sync -- a key that silently fell
-out of step here would be stored and never restored, or vice versa.
-"""
+_COMPRESSIBLE = ("application/json", "text/", "application/javascript", "image/svg")
+_MIN_GZIP = 1024
 
 
 def _conn() -> sqlite3.Connection:
@@ -57,197 +41,180 @@ def _conn() -> sqlite3.Connection:
     return get_conn()
 
 
-def _int(name: str) -> int | None:
-    """Tolerant parse: a hand-edited `?price_min=abc` must not 500."""
-    raw = (request.args.get(name) or "").strip().replace(".", "").replace(",", "")
+def _offering(raw: str) -> str:
+    if raw not in db.OFFERING_TYPES:
+        abort(404)
+    return raw
+
+
+# --- caching ---------------------------------------------------------------
+
+
+def _data_version() -> tuple[int, ...]:
+    """Changes whenever the cache does.
+
+    A `fetch` commits into the WAL, and a checkpoint later folds it into the
+    main file, so between them the two stats move on every write. That is far
+    cheaper than asking SQLite, and a spurious change only costs a rebuild.
+    """
+    path: Path = current_app.config["DB_PATH"]
+    version: list[int] = []
+    for candidate in (path, path.with_name(path.name + "-wal")):
+        try:
+            stat = candidate.stat()
+        except FileNotFoundError:
+            version += [0, 0]
+        else:
+            version += [stat.st_mtime_ns, stat.st_size]
+    return tuple(version)
+
+
+class _Payload:
+    """A serialised response body, its gzip, and an ETag over its content."""
+
+    __slots__ = ("body", "etag", "gzipped")
+
+    def __init__(self, data: Any) -> None:
+        self.body = json.dumps(data, separators=(",", ":")).encode()
+        self.gzipped = gzip.compress(self.body, compresslevel=6)
+        self.etag = hashlib.sha1(self.body, usedforsecurity=False).hexdigest()[:20]
+
+
+def _cached(key: str, build: Any) -> _Payload:
+    """Build once per data version, per process.
+
+    The index is ~1.5 MB of JSON for a few thousand houses and every page load
+    revalidates it, so rebuilding it per request would make the cheapest
+    response in the app the most expensive one.
+    """
+    store: dict[str, tuple[tuple[int, ...], _Payload]]
+    store = current_app.extensions.setdefault("housemaster_payloads", {})
+    version = _data_version()
+    hit = store.get(key)
+    if hit is None or hit[0] != version:
+        hit = (version, _Payload(build()))
+        store[key] = hit
+    return hit[1]
+
+
+def _respond(payload: _Payload) -> Response:
+    """Conditional and compressed. A 304 is the common case on a warm client."""
+    if payload.etag in request.if_none_match:
+        response = Response(status=304)
+    elif "gzip" in request.accept_encodings:
+        response = Response(payload.gzipped, mimetype="application/json")
+        response.headers["Content-Encoding"] = "gzip"
+    else:
+        response = Response(payload.body, mimetype="application/json")
+    response.set_etag(payload.etag)
+    response.headers["Vary"] = "Accept-Encoding"
+    # Always revalidate: the ETag makes that one cheap round trip.
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# --- the API ---------------------------------------------------------------
+
+
+def _epoch(timestamp: str | None) -> int | None:
+    """ISO timestamp to epoch seconds. Shorter on the wire, and sortable as a
+    number; the browser formats it in Dutch local time."""
+    if not timestamp:
+        return None
     try:
-        return int(raw) if raw else None
+        moment = datetime.fromisoformat(timestamp)
     except ValueError:
         return None
+    if moment.tzinfo is None:
+        # A bare date predates keeping the clock time. Midnight UTC keeps it on
+        # the right day in Amsterdam, which is all such a row ever claimed.
+        return int(datetime.fromisoformat(timestamp[:10] + "T00:00:00+00:00").timestamp())
+    return int(moment.timestamp())
 
 
-def current_offering() -> str:
-    requested = (request.args.get("offering") or "").strip()
-    return requested if requested in db.OFFERING_TYPES else db.BUY
-
-
-def filters_from_args() -> db.Filters:
-    return db.Filters(
-        offering_type=current_offering(),
-        q=(request.args.get("q") or "").strip(),
-        price_min=_int("price_min"),
-        price_max=_int("price_max"),
-        area_min=_int("area_min"),
-        area_max=_int("area_max"),
-        rooms_min=_int("rooms_min"),
-        beds_min=_int("beds_min"),
-        labels=tuple(request.args.getlist("label")),
-        hoods=tuple(request.args.getlist("hood")),
-        status=(request.args.get("status") or "").strip(),
-        include_delisted=request.args.get("delisted") == "1",
-        sort=(request.args.get("sort") or db.DEFAULT_SORT),
-    )
-
-
-def current_view() -> str:
-    requested = (request.args.get("view") or "").strip()
-    return requested if requested in VIEWS else "grid"
-
-
-def _is_partial() -> bool:
-    """htmx swaps get the fragment -- but a history restore needs a full page,
-    or the back button lands on a bare fragment."""
-    return (
-        request.headers.get("HX-Request") == "true"
-        and request.headers.get("HX-History-Restore-Request") != "true"
-    )
-
-
-def _page_context(conn: sqlite3.Connection) -> dict[str, Any]:
-    filters = filters_from_args()
-    offering = filters.offering_type
-    page = max(_int("page") or 1, 1)
-    listings = db.query_listings(
-        conn, filters, limit=PER_PAGE, offset=(page - 1) * PER_PAGE
-    )
-    total = db.count_listings(conn, filters)
-    area_lo, area_hi = db.area_bounds(conn, offering)
-
-    # Built here rather than in the template: carrying the current filters over
-    # to the next page is URL work, not markup.
-    next_args = request.args.to_dict(flat=False) | {"page": [str(page + 1)]}
-    view = current_view()
-
-    # The map reads its own data from this URL rather than from the swapped
-    # markup, so the map instance survives a filter change with its viewport
-    # intact instead of being torn down and rebuilt.
-    #
-    # `sort` is stripped along with `page` and `view`: a map has no order, and
-    # leaving it in changed the URL on every sort change, which made MapLibre
-    # refetch and redraw the whole source for no reason at all.
-    geojson_args = {
-        k: v
-        for k, v in request.args.to_dict(flat=False).items()
-        if k not in {"page", "view", "sort"}
-    }
-
-    return {
-        "listings": listings,
-        "more_url": url_for("browse.more", **next_args),
-        "view": view,
-        "bounds": db.map_bounds(conn, filters) if view == "map" else None,
-        "geojson_url": url_for("browse.houses_geojson", **geojson_args),
-        # The outlines are a context layer, not part of the filtered set, so
-        # this URL is constant and the map never has to reload it.
-        "shapes_url": url_for("browse.neighbourhoods_geojson"),
-        "offering": offering,
-        # Switching mode drops the price bounds: a 0-1800 rent range is
-        # meaningless for buying and 250k-350k is meaningless for renting.
-        "offering_url": {
-            other: url_for(
-                "browse.index",
-                **(
-                    {
-                        k: v
-                        for k, v in request.args.to_dict(flat=False).items()
-                        if k not in PRICE_BOUND_ARGS and k != "page"
-                    }
-                    | {"offering": [other]}
-                ),
-            )
-            for other in db.OFFERING_TYPES
-        },
-        "hood_scale": db.neighbourhood_price_scale(conn) if view == "map" else None,
-        # Clears every filter but keeps the view: "clear all filters" should
-        # not also mean "and put me back on the grid". Omitted for the default
-        # so the clean case stays a bare `/`.
-        "reset_url": url_for(
-            "browse.index",
-            **({"view": view} if view != "grid" else {}),
-            **({"offering": offering} if offering != db.BUY else {}),
-        ),
-        "other_view": "grid" if view == "map" else "map",
-        "view_url": url_for(
-            "browse.index",
-            **(
-                request.args.to_dict(flat=False)
-                | {"view": ["grid" if view == "map" else "map"], "page": ["1"]}
-            ),
-        ),
-        "total": total,
-        # Only computed for the map: the grid does not care, and it is a second
-        # COUNT over the same predicate.
-        "mapped": db.count_map_points(conn, filters) if view == "map" else None,
-        "map_limit": db.MAX_MAP_POINTS,
-        "filter_keys": FILTER_KEYS,
-        # So the empty state can tell "nothing matched" apart from "nothing
-        # fetched yet" -- the fragment is rendered without the full page context.
-        "counts": db.counts(conn, offering),
-        "has_boundaries": db.counts(conn)["boundaries"] if view == "map" else 0,
-        "page": page,
-        "has_more": page * PER_PAGE < total,
-        "next_page": page + 1,
-        "filters": filters,
-        "query": request.args.to_dict(flat=False),
-        "area_range": (area_lo, area_hi),
-        "sorts": db.SORTS,
-        "status_label": status_label,
-    }
-
-
-@bp.route("/")
-def index() -> str:
+def _index(offering: str) -> dict[str, Any]:
     conn = _conn()
-    context = _page_context(conn)
-    offering = context["offering"]
-    if _is_partial():
-        return render_template("_results.html", **context)
-    return render_template(
-        "index.html",
-        neighbourhoods=db.distinct_neighbourhoods(conn, offering),
-        label_counts=db.label_counts(conn, offering),
-        energy_scale=ENERGY_SCALE,
-        price_range=db.price_bounds(conn, offering),
-        last_run=db.latest_run(conn),
-        **context,
-    )
+    rows = db.browse_index(conn, offering)
+    columns = list(db.INDEX_COLUMNS)
+    time_columns = {columns.index(c) for c in ("published", "first_seen_at")}
+    delisted = columns.index("delisted_at")
+
+    def encode(row: sqlite3.Row) -> list[Any]:
+        values = list(row)
+        for i in time_columns:
+            values[i] = _epoch(values[i])
+        # The browser only needs to know *whether*; the date is on the detail.
+        values[delisted] = 1 if values[delisted] else 0
+        return values
+
+    run = db.latest_run(conn)
+    return {
+        "offering": offering,
+        # Columnar: names once, then bare arrays. Half the size of an array of
+        # objects before gzip, and still a fifth smaller after it.
+        "columns": columns,
+        "rows": [encode(row) for row in rows],
+        "meta": {
+            "counts": db.counts(conn, offering),
+            "last_run": _epoch(run["started_at"]) if run else None,
+            "hood_scale": db.neighbourhood_price_scale(conn),
+        },
+    }
 
 
-@bp.route("/houses.geojson")
-def houses_geojson() -> Response:
-    """The filtered set as GeoJSON, for the map layer to render.
+@bp.route("/api/index/<offering>")
+def index(offering: str) -> Response:
+    """One offering type's whole browse index. See `db.browse_index`."""
+    offering = _offering(offering)
+    return _respond(_cached(f"index:{offering}", lambda: _index(offering)))
 
-    Carries only what drawing a marker needs -- the popup fetches its own card,
-    so this stays small even at a few thousand houses.
+
+@bp.route("/api/search/<offering>")
+def search(offering: str) -> Response:
+    """Ids whose address, buurt or description contains `q`.
+
+    The browser matches address and buurt itself, instantly, and merges these
+    in when they arrive -- descriptions are too large to ship in the index.
     """
-    rows = db.query_map_points(_conn(), filters_from_args())
+    offering = _offering(offering)
+    q = (request.args.get("q") or "").strip()[:MAX_QUERY]
+    ids = db.search_ids(_conn(), offering, q) if q else []
+    return jsonify({"q": q, "ids": ids})
+
+
+@bp.route("/api/house/<int:listing_id>")
+def house(listing_id: int) -> Response:
+    """Everything the detail page shows beyond what the index already holds."""
+    conn = _conn()
+    listing = db.get_listing(conn, listing_id)
+    if listing is None:
+        abort(404)
     return jsonify(
         {
-            "type": "FeatureCollection",
+            "listing": {k: listing[k] for k in listing.keys()},  # noqa: SIM118 - Row
             "features": [
                 {
-                    "type": "Feature",
-                    "id": row["listing_id"],
-                    "geometry": {
-                        "type": "Point",
-                        # GeoJSON is lng,lat -- the opposite order to how the
-                        # rest of this codebase says it.
-                        "coordinates": [row["lng"], row["lat"]],
-                    },
-                    "properties": {
-                        "id": row["listing_id"],
-                        "label": row["energy_label"] or "?",
-                        "price": row["price"],
-                    },
+                    "group": row["group_title"],
+                    "label": row["label"],
+                    "value": row["value"],
                 }
-                for row in rows
+                for row in db.get_features(conn, listing_id)
+            ],
+            "photos": [row["image_id"] for row in db.get_photos(conn, listing_id)],
+            "history": [
+                {
+                    "id": row["id"],
+                    "observed_at": row["observed_at"],
+                    "price": row["price"],
+                    "status": row["status"],
+                }
+                for row in db.get_price_history(conn, listing_id)
             ],
         }
     )
 
 
-@bp.route("/neighbourhoods.geojson")
-def neighbourhoods_geojson() -> Response:
+def _shapes() -> dict[str, Any]:
     """Buurt outlines, coloured by funda's own price level for that buurt.
 
     Unfiltered on purpose: this is the map's context layer. Outlines that
@@ -258,60 +225,91 @@ def neighbourhoods_geojson() -> Response:
     in with `json.loads` rather than rebuilt -- funda's ring order and winding
     are preserved exactly as fetched.
     """
-    rows = db.neighbourhood_shapes(_conn())
-    return jsonify(
-        {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "id": index,
-                    "geometry": json.loads(row["geometry"]),
-                    "properties": {
-                        "name": row["name"],
-                        "price_m2": row["price_m2"],
-                    },
-                }
-                for index, row in enumerate(rows)
-            ],
-        }
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": index,
+                "geometry": json.loads(row["geometry"]),
+                "properties": {"name": row["name"], "price_m2": row["price_m2"]},
+            }
+            for index, row in enumerate(db.neighbourhood_shapes(_conn()))
+        ],
+    }
+
+
+@bp.route("/api/neighbourhoods.geojson")
+def neighbourhoods_geojson() -> Response:
+    return _respond(_cached("shapes", _shapes))
+
+
+@bp.route("/api/<path:_rest>")
+def api_not_found(_rest: str) -> Response:
+    """An unknown API path is a JSON 404, never the app shell -- a client that
+    got HTML back from a typo'd endpoint would fail somewhere far less obvious."""
+    response = jsonify({"error": "not found"})
+    response.status_code = 404
+    return response
+
+
+# --- the app shell ---------------------------------------------------------
+
+
+def _asset(path: Path) -> tuple[bytes, bytes | None, str]:
+    """A built file, read once per mtime, with a gzip beside it if worth it."""
+    store: dict[Path, tuple[int, tuple[bytes, bytes | None, str]]]
+    store = current_app.extensions.setdefault("housemaster_assets", {})
+    mtime = path.stat().st_mtime_ns
+    hit = store.get(path)
+    if hit is None or hit[0] != mtime:
+        body = path.read_bytes()
+        mimetype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        compress = mimetype.startswith(_COMPRESSIBLE) and len(body) >= _MIN_GZIP
+        hit = (mtime, (body, gzip.compress(body, 6) if compress else None, mimetype))
+        store[path] = hit
+    return hit[1]
+
+
+def _serve(path: Path, *, immutable: bool) -> Response:
+    body, gzipped, mimetype = _asset(path)
+    if gzipped is not None and "gzip" in request.accept_encodings:
+        response = Response(gzipped, mimetype=mimetype)
+        response.headers["Content-Encoding"] = "gzip"
+    else:
+        response = Response(body, mimetype=mimetype)
+    response.headers["Vary"] = "Accept-Encoding"
+    # Vite puts a content hash in every asset name, so an asset URL never
+    # changes meaning and can be cached for good. The shell cannot: it is what
+    # points at the current hashes.
+    response.headers["Cache-Control"] = (
+        "public, max-age=31536000, immutable" if immutable else "no-cache"
     )
+    if not immutable:
+        response.add_etag()
+        response.make_conditional(request)
+    return response
 
 
-@bp.route("/house/<int:listing_id>/card")
-def house_card(listing_id: int) -> str:
-    """The popup shown when a map marker is clicked.
+@bp.route("/", defaults={"path": ""})
+@bp.route("/<path:path>")
+def shell(path: str) -> Response:
+    dist: Path = current_app.config["DIST_DIR"]
+    shell_file = dist / "index.html"
+    if not shell_file.is_file():
+        return Response(
+            "The web app is not built. Run `npm run build` in frontend/, "
+            "or `npm run dev` there and open the Vite URL.\n",
+            status=503,
+            mimetype="text/plain",
+        )
 
-    Rendered by Jinja rather than assembled in JavaScript, so the card shares
-    exactly one definition of how a house is presented.
-    """
-    listing = db.get_listing(_conn(), listing_id)
-    if listing is None:
-        abort(404)
-    return render_template("_popup.html", house=listing, status_label=status_label)
-
-
-@bp.route("/more")
-def more() -> str:
-    """Next batch of cards, appended by the infinite-scroll sentinel."""
-    return render_template("_cards.html", **_page_context(_conn()))
-
-
-@bp.route("/house/<int:listing_id>")
-def house(listing_id: int) -> str:
-    conn = _conn()
-    listing = db.get_listing(conn, listing_id)
-    if listing is None:
-        abort(404)
-
-    history = db.get_price_history(conn, listing_id)
-    return render_template(
-        "house.html",
-        listing=listing,
-        features=db.get_features(conn, listing_id),
-        photos=db.get_photos(conn, listing_id),
-        history=history,
-        first_price=history[0]["price"] if history else None,
-        status_label=status_label,
-        GALLERY_PREVIEW=GALLERY_PREVIEW,
-    )
+    if path:
+        candidate = (dist / path).resolve()
+        # resolve() then a containment check: `..` in the path must not walk
+        # out of the build directory.
+        if candidate.is_relative_to(dist) and candidate.is_file():
+            return _serve(candidate, immutable=path.startswith("assets/"))
+        if path.startswith("assets/"):
+            abort(404)  # a stale hash, not a client-side route
+    return _serve(shell_file, immutable=False)

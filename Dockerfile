@@ -6,6 +6,20 @@
 # UV_NO_BUILD on the dependency step is the guard: if a musl wheel ever
 # disappears the build fails loudly rather than quietly compiling for an hour.
 
+# The front end first. Node is only needed to build it: the output is static
+# files, copied into the Python package below, so the runtime image carries no
+# Node at all.
+FROM node:22-alpine AS frontend
+
+WORKDIR /frontend
+# Lockfile before source, so editing a component does not reinstall packages.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+# vite.config.ts writes to ../src/housemaster/web/dist.
+RUN npm run build
+
+
 FROM python:3.14-alpine AS build
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -17,13 +31,14 @@ ENV UV_PYTHON_DOWNLOADS=never \
 WORKDIR /app
 
 # Dependencies resolve from the lockfile before the source is copied, so editing
-# a template does not re-resolve or re-download anything.
+# the source does not re-resolve or re-download anything.
 COPY pyproject.toml uv.lock README.md ./
 RUN UV_NO_BUILD=1 uv sync --frozen --no-dev --no-install-project --extra serve
 
 # The project itself has no wheel and is built here, so the guard above cannot
 # apply to this step.
 COPY src ./src
+COPY --from=frontend /src/housemaster/web/dist ./src/housemaster/web/dist
 RUN uv sync --frozen --no-dev --no-editable --extra serve
 
 

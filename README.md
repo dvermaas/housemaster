@@ -3,11 +3,11 @@
 Track houses on [funda.nl](https://www.funda.nl) without checking it every day.
 
 Point it at one or more funda searches. It caches everything they return in
-SQLite, records price and status changes over time, and serves a filterable web
-UI with a map. No HTML parsing and no browser: funda is a server-rendered Nuxt
+SQLite, records price and status changes over time, and serves a fast,
+filterable web app with a map. No HTML parsing and no browser: funda is a server-rendered Nuxt
 app that ships its full state as JSON in every page.
 
-![status](https://img.shields.io/badge/tests-316-brightgreen)
+![status](https://img.shields.io/badge/tests-298-brightgreen)
 ![python](https://img.shields.io/badge/python-3.14-blue)
 ![licence](https://img.shields.io/badge/licence-MIT-blue)
 
@@ -17,6 +17,7 @@ app that ships its full state as JSON in every page.
 uv sync
 uv run housemaster add 'https://www.funda.nl/zoeken/koop?selected_area=den-haag&floor_area=50-'
 uv run housemaster fetch     # first run takes a few minutes
+(cd frontend && npm ci && npm run build)
 uv run housemaster serve     # http://127.0.0.1:8765
 ```
 
@@ -85,13 +86,28 @@ src/housemaster/
   net.py       the one place an HTTP request is made
   funda.py     search + detail extraction, bot-wall detection
   db.py        SQLite: schema, migrations, upserts, queries
-  photos.py    CDN photo URLs (imports nothing)
   pipeline.py  the fetch orchestration
   schedule.py  when the next daily run is due
   render.py    text / json / csv output
   cli.py       argparse entry point
-  web/         Flask app: views, filters, templates, map.js
+  web/         Flask: a JSON API, and the built SPA from frontend/
+
+frontend/      React + Vite + TanStack Router/Query + shadcn/ui (Base UI)
+  src/lib/       the index, filters, formatting -- no React
+  src/components/  pages; ui/ is the shadcn design system
 ```
+
+## The web app
+
+The browser does the browsing. It downloads one side's whole index once
+(~5 000 houses, ~450 KB gzipped), keeps it in IndexedDB, and filters, sorts and
+maps it in memory: a filter change never touches the network, and a return
+visit paints from disk before revalidating with an ETag. The server answers
+the two things the index cannot — text search over descriptions, and one
+house's detail — and the detail is prefetched on hover.
+
+Keyboard: `⌘K` jump to a house, `/` search, `M` grid/map, `J`/`K` next/previous
+house, `Esc` back, `D` dark mode.
 
 `devalue`, `funda`, `db` and `web` each know nothing about the others' concerns;
 `pipeline` is the only module that touches both the network and the database.
@@ -100,13 +116,19 @@ See `CLAUDE.md` for the invariants worth not breaking.
 ## Development
 
 ```bash
-uv run pytest                              # 316 tests, offline
+uv run pytest                              # 269 tests, offline
 uv run ruff check . && uv run ruff format .
 HOUSEMASTER_NETWORK_TESTS=1 uv run pytest -m network   # live-site canary
+
+cd frontend
+npm run dev        # Vite on :5173, proxying /api to `housemaster serve` on :8765
+npm test           # 29 tests
+npm run lint       # oxlint, with @shadcn/lint's design-system rules
+npm run build      # into src/housemaster/web/dist, which `serve` picks up
 ```
 
 `uv sync` fails on Windows while `serve` or `fetch` is running — stop them
-first. Flask caches templates unless `--debug` is passed.
+first.
 
 ## Before you point this at funda
 

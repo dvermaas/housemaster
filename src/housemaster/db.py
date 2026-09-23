@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -762,62 +761,12 @@ def counts(conn: sqlite3.Connection, offering_type: str | None = None) -> dict[s
     }
 
 
-def distinct_neighbourhoods(
-    conn: sqlite3.Connection, offering_type: str = BUY
-) -> list[str]:
-    rows = conn.execute(
-        "SELECT DISTINCT neighbourhood FROM listings "
-        "WHERE neighbourhood <> '' AND delisted_at IS NULL AND offering_type = ? "
-        "ORDER BY neighbourhood",
-        (offering_type,),
-    ).fetchall()
-    return [row["neighbourhood"] for row in rows]
-
-
-# --- the web UI's query ----------------------------------------------------
-
-# (column, direction). Kept apart so the NULLs-last prefix can reference the
-# bare column -- `ORDER BY price ASC IS NULL` is a syntax error.
-SORTS: dict[str, tuple[str, str]] = {
-    # Funda's publication date, not first_seen_at: every house in a freshly
-    # built cache shares one first_seen_at, so that would order them randomly.
-    "newest": ("published", "DESC"),
-    "oldest": ("published", "ASC"),
-    "added": ("first_seen_at", "DESC"),
-    "price_asc": ("price", "ASC"),
-    "price_desc": ("price", "DESC"),
-    "ppm2_asc": ("price_per_m2", "ASC"),
-    "ppm2_desc": ("price_per_m2", "DESC"),
-    "area_desc": ("living_area", "DESC"),
-    "area_asc": ("living_area", "ASC"),
-}
-DEFAULT_SORT = "newest"
-
-
-@dataclass(frozen=True, slots=True)
-class Filters:
-    """Everything the browse page can narrow by.
-
-    `offering_type` is the one field that is **not** optional in spirit: it
-    always has a value and `_where` always emits it, because `price` and
-    `price_per_m2` mean different things for buy and rent and a query that
-    forgets to scope them would mis-sort silently rather than fail.
-    """
-
-    offering_type: str = BUY
-    q: str = ""
-    price_min: int | None = None
-    price_max: int | None = None
-    area_min: int | None = None
-    area_max: int | None = None
-    rooms_min: int | None = None
-    beds_min: int | None = None
-    labels: tuple[str, ...] = ()
-    hoods: tuple[str, ...] = ()
-    status: str = ""
-    include_delisted: bool = False
-    sort: str = DEFAULT_SORT
-
+# --- the web UI's queries --------------------------------------------------
+#
+# The browser filters, sorts and maps in memory: it downloads one offering
+# type's whole index once and never asks the server to narrow it. So there is
+# no WHERE builder here -- just the index itself, and the one filter the index
+# cannot answer on its own, which is text search over descriptions.
 
 _CARD_EXTRAS = """
     (SELECT p.image_id FROM photos p
@@ -830,153 +779,46 @@ _CARD_EXTRAS = """
 """Per-card extras: the CDN id of the first photo, and the highest earlier
 price if this house has come down."""
 
-
-def _where(filters: Filters) -> tuple[str, list[Any]]:
-    """Build the WHERE clause. Every value is bound, never interpolated."""
-    # Always first, and never optional -- see Filters.
-    clauses: list[str] = ["offering_type = ?"]
-    params: list[Any] = [filters.offering_type]
-
-    if not filters.include_delisted:
-        clauses.append("delisted_at IS NULL")
-    if filters.q:
-        clauses.append("(address LIKE ? OR neighbourhood LIKE ? OR description LIKE ?)")
-        params += [f"%{filters.q}%"] * 3
-
-    for column, value, op in (
-        ("price", filters.price_min, ">="),
-        ("price", filters.price_max, "<="),
-        ("living_area", filters.area_min, ">="),
-        ("living_area", filters.area_max, "<="),
-        ("rooms", filters.rooms_min, ">="),
-        ("bedrooms", filters.beds_min, ">="),
-    ):
-        if value is not None:
-            clauses.append(f"{column} {op} ?")
-            params.append(value)
-
-    for column, values in (
-        ("energy_label", filters.labels),
-        ("neighbourhood", filters.hoods),
-    ):
-        if values:
-            clauses.append(f"{column} IN ({', '.join('?' * len(values))})")
-            params += list(values)
-
-    if filters.status:
-        clauses.append("status = ?")
-        params.append(filters.status)
-
-    return " WHERE " + " AND ".join(clauses), params
+INDEX_COLUMNS = (
+    "listing_id", "address", "postal_code", "city", "neighbourhood", "price",
+    "price_per_m2", "living_area", "rooms", "bedrooms", "energy_label", "status",
+    "agent", "published", "first_seen_at", "delisted_at", "lat", "lng",
+    "first_image", "price_was",
+)  # fmt: skip
+"""What the browser holds per house: a card, a map marker, and every field a
+filter or sort reads. Descriptions are not here -- at ~4 KB each they would be
+most of the payload -- which is why `search_ids` exists."""
 
 
-def query_listings(
-    conn: sqlite3.Connection, filters: Filters, *, limit: int = 30, offset: int = 0
-) -> list[sqlite3.Row]:
-    where, params = _where(filters)
-    # Both interpolations are internally controlled: `where` is assembled from a
-    # fixed column list with `?` placeholders for every value, and `order` is a
-    # lookup in SORTS with a default. No caller string reaches the SQL text.
-    column, direction = SORTS.get(filters.sort, SORTS[DEFAULT_SORT])
-    # `col IS NULL` first puts houses missing that value last in either
-    # direction; listing_id breaks ties so paging can never repeat a row.
-    #
-    # The two subqueries give each card its photo and price-drop marker in one
-    # round trip instead of N+1 lookups from the template.
+def browse_index(conn: sqlite3.Connection, offering_type: str) -> list[sqlite3.Row]:
+    """Every listing of one offering type, delisted ones included.
+
+    **Scoped by `offering_type`, always.** `price` is euros to buy and euros per
+    month to rent, so an index spanning both would let one sort or one price
+    bound cut across two scales.
+
+    Delisted houses ship too, flagged: "include houses that left this search" is
+    a filter, and a filter must not need a round trip.
+    """
     return conn.execute(
-        f"SELECT *, {_CARD_EXTRAS} FROM listings{where} "  # noqa: S608
-        f"ORDER BY {column} IS NULL, {column} {direction}, listing_id "
-        "LIMIT ? OFFSET ?",
-        [*params, limit, offset],
+        f"SELECT {', '.join(INDEX_COLUMNS[:-2])}, {_CARD_EXTRAS} "  # noqa: S608
+        "FROM listings WHERE offering_type = ? ORDER BY listing_id",
+        (offering_type,),
     ).fetchall()
 
 
-MAX_MAP_POINTS = 5000
-"""A ceiling so a pathological filter cannot ship an unbounded payload."""
+def search_ids(conn: sqlite3.Connection, offering_type: str, q: str) -> list[int]:
+    """Listings whose address, buurt or description contains `q`.
 
-
-def query_map_points(
-    conn: sqlite3.Connection, filters: Filters, *, limit: int = MAX_MAP_POINTS
-) -> list[sqlite3.Row]:
-    """Every matching house that has coordinates -- not a page of them.
-
-    The map plots the whole filtered set at once, so this deliberately ignores
-    the pagination `query_listings` applies. Only the fields the map needs to
-    *render* are selected; the popup fetches its own card.
+    The same three columns the browser matches on its own, so the result is a
+    superset of what it already shows -- the server only adds the description
+    hits. LIKE is case-insensitive for ASCII only, which the browser mirrors.
     """
-    where, params = _where(filters)
-    return conn.execute(
-        f"SELECT listing_id, lat, lng, energy_label, price, price_per_m2 "  # noqa: S608
-        f"FROM listings{where} AND lat IS NOT NULL ORDER BY listing_id LIMIT ?",
-        [*params, limit],
-    ).fetchall()
-
-
-def count_map_points(conn: sqlite3.Connection, filters: Filters) -> int:
-    """How many of the filtered houses the map can actually plot.
-
-    Coordinates only arrive with the detail page, so during a first fetch this
-    trails `count_listings` badly. The UI says so rather than quietly drawing a
-    subset -- a map that silently omits four fifths of the results is worse than
-    one that admits it.
-    """
-    where, params = _where(filters)
-    row = conn.execute(
-        f"SELECT COUNT(*) FROM listings{where} AND lat IS NOT NULL",  # noqa: S608
-        params,
-    ).fetchone()
-    return int(row[0])
-
-
-def map_bounds(conn: sqlite3.Connection, filters: Filters) -> tuple[float, ...] | None:
-    """Bounding box of the filtered set, as (min_lng, min_lat, max_lng, max_lat).
-
-    Computed here so the map can fit its view from one number quartet instead of
-    downloading the whole GeoJSON a second time just to measure it.
-    """
-    where, params = _where(filters)
-    row = conn.execute(
-        f"SELECT MIN(lng) x1, MIN(lat) y1, MAX(lng) x2, MAX(lat) y2 "  # noqa: S608
-        f"FROM listings{where} AND lat IS NOT NULL",
-        params,
-    ).fetchone()
-    if row is None or row["x1"] is None:
-        return None
-    return (row["x1"], row["y1"], row["x2"], row["y2"])
-
-
-def count_listings(conn: sqlite3.Connection, filters: Filters) -> int:
-    where, params = _where(filters)
-    row = conn.execute(f"SELECT COUNT(*) FROM listings{where}", params).fetchone()  # noqa: S608
-    return int(row[0])
-
-
-def price_bounds(conn: sqlite3.Connection, offering_type: str = BUY) -> tuple[int, int]:
-    """Range for the filter sliders, from the data rather than hardcoded.
-
-    Scoped, or a cache holding both would offer a slider from 170 to 6 450 000.
-    """
-    row = conn.execute(
-        "SELECT MIN(price) AS lo, MAX(price) AS hi FROM listings "
-        "WHERE price > 0 AND delisted_at IS NULL AND offering_type = ?",
-        (offering_type,),
-    ).fetchone()
-    return (row["lo"] or 0, row["hi"] or 0)
-
-
-def area_bounds(conn: sqlite3.Connection, offering_type: str = BUY) -> tuple[int, int]:
-    row = conn.execute(
-        "SELECT MIN(living_area) AS lo, MAX(living_area) AS hi FROM listings "
-        "WHERE living_area > 0 AND delisted_at IS NULL AND offering_type = ?",
-        (offering_type,),
-    ).fetchone()
-    return (row["lo"] or 0, row["hi"] or 0)
-
-
-def label_counts(conn: sqlite3.Connection, offering_type: str = BUY) -> dict[str, int]:
+    pattern = f"%{q}%"
     rows = conn.execute(
-        "SELECT energy_label, COUNT(*) AS n FROM listings "
-        "WHERE delisted_at IS NULL AND offering_type = ? GROUP BY energy_label",
-        (offering_type,),
+        "SELECT listing_id FROM listings WHERE offering_type = ? "
+        "AND (address LIKE ? OR neighbourhood LIKE ? OR description LIKE ?) "
+        "ORDER BY listing_id",
+        (offering_type, pattern, pattern, pattern),
     ).fetchall()
-    return {row["energy_label"]: row["n"] for row in rows}
+    return [row["listing_id"] for row in rows]

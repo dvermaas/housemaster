@@ -18,3 +18,8 @@ build/
 .mcp.json
 .env
 *.png
+
+# The frontend stage installs and builds its own; a host node_modules (perhaps
+# for another platform) or a stale build must not leak into it.
+frontend/node_modules/
+src/housemaster/web/dist/

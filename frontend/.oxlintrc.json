@@ -1,0 +1,75 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "react",
+    "jsx-a11y",
+    "import",
+    "unicorn",
+    "oxc"
+  ],
+  "jsPlugins": [
+    "@shadcn/lint"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "env": {
+    "browser": true,
+    "es2024": true
+  },
+  "ignorePatterns": [
+    "dist"
+  ],
+  "settings": {
+    "shadcn": {
+      "note": "Colours are theme tokens in src/index.css (energy-*, choro-*); add one there rather than reaching for a palette colour."
+    }
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "warn",
+    "shadcn/no-restyle": [
+      "error",
+      {
+        "allow": [
+          "layout"
+        ]
+      }
+    ],
+    "shadcn/no-raw-colors": "error",
+    "shadcn/no-arbitrary-values": "error",
+    "shadcn/no-inline-styles": "error",
+    "shadcn/no-unknown-classes": "error",
+    "shadcn/require-static-classes": "error",
+    "import/no-unassigned-import": [
+      "warn",
+      {
+        "allow": [
+          "**/*.css"
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/components/ui/**"
+      ],
+      "rules": {
+        "shadcn/no-restyle": "off",
+        "shadcn/no-arbitrary-values": "off",
+        "shadcn/require-static-classes": "off",
+        "jsx-a11y/prefer-tag-over-role": "off",
+        "jsx-a11y/label-has-associated-control": "off",
+        "jsx-a11y/no-noninteractive-element-interactions": "off",
+        "jsx-a11y/click-events-have-key-events": "off",
+        "react/jsx-no-constructed-context-values": "off",
+        "react/no-array-index-key": "off"
+      }
+    }
+  ]
+}
